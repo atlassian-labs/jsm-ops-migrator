@@ -1,0 +1,11 @@
+# Without a command and without a terminal, jsm-ops-migrator prints the help
+# instead of the menu, so scripts and CI never wait for input.
+exec jsm-ops-migrator
+stdout 'Migrate a PagerDuty configuration into JSM Operations'
+stdout 'Run jsm-ops-migrator without a command to choose from a menu'
+stdout '^  login '
+stdout '^  pause '
+! stderr .
+
+exec jsm-ops-migrator --help
+stdout 'Available Commands'

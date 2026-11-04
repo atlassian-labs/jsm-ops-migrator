@@ -1,0 +1,18 @@
+# Files go to ~/jsm-ops-migrator unless --workspace or JSM_OPS_MIGRATOR_WORKSPACE says
+# otherwise. Commands that need an existing workspace never create one.
+env HOME=$WORK/home
+env USERPROFILE=$WORK/home
+
+! exec jsm-ops-migrator plan
+stderr 'plan: not implemented yet'
+exists $WORK/home/jsm-ops-migrator/artifacts
+exists $WORK/home/jsm-ops-migrator/lock
+
+! exec jsm-ops-migrator apply --workspace $WORK/elsewhere
+stderr 'run .jsm-ops-migrator login. first'
+! exists $WORK/elsewhere
+
+env JSM_OPS_MIGRATOR_WORKSPACE=$WORK/from-env
+! exec jsm-ops-migrator login
+stderr 'login: not implemented yet'
+exists $WORK/from-env/artifacts
