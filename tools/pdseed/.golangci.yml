@@ -1,0 +1,10 @@
+version: "2"
+
+# pdseed writes to PagerDuty and exits with os.Exit by design, so the CLI's
+# import and call rules do not apply here; only the standard linters do.
+linters:
+  default: standard
+
+formatters:
+  enable:
+    - gofmt

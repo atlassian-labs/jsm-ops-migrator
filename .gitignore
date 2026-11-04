@@ -1,0 +1,29 @@
+# Build output
+/jsm-ops-migrator
+/bin/
+/dist/
+*.test
+*.out
+/tools/pdseed/pdseed
+
+# A workspace created by running the CLI in the repository root
+/config.yaml
+/state.db
+/state.db-wal
+/state.db-shm
+/lock
+/artifacts/
+/credentials.enc
+/active-run.json
+/pause-request.json
+/decisions.json
+/placeholder-calls.jsonl
+
+# The CLI and tools/pdseed are separate modules on purpose; never link them
+go.work
+go.work.sum
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
