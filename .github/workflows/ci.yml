@@ -1,0 +1,177 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly: longer fuzzing and fresh vulnerability data.
+    - cron: "23 4 * * *"
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run; runs on main and the
+# nightly run never cancel each other.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # bash on every runner, Windows included, so a multi-line step fails on
+    # its first failing command.
+    shell: bash
+
+env:
+  # The release builds without cgo, so everything is tested that way; only
+  # the race job turns it on, because the race detector needs it.
+  CGO_ENABLED: "0"
+  GOLANGCI_LINT_VERSION: v2.15.0
+  GOVULNCHECK_VERSION: v1.9.0
+  OSV_SCANNER_VERSION: v2.7.0
+  GO_LICENSES_VERSION: v2.0.1
+  ALLOWED_LICENSES: Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT
+  # MPL-2.0 is accepted only for these modules, by name, until the
+  # open-source review decides. Any other MPL-2.0 module fails the check.
+  MPL_ALLOWED: github.com/hashicorp/go-retryablehttp pgregory.net/rapid
+
+jobs:
+  build-test:
+    name: build-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - name: tools/pdseed
+        working-directory: tools/pdseed
+        run: |
+          go build ./...
+          go vet ./...
+
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The CLI uses no cgo, so one Linux runner builds every target.
+      - name: build all six targets
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            echo "building $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./cmd/jsm-ops-migrator
+          done
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+        env:
+          CGO_ENABLED: "1"
+
+  fuzz:
+    runs-on: ubuntu-latest
+    env:
+      FUZZTIME: ${{ github.event_name == 'schedule' && '10m' || '30s' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Every Fuzz function is found automatically, so a new one is fuzzed
+      # without changing this file.
+      - name: fuzz every target
+        run: |
+          for pkg in $(go list ./...); do
+            for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz' || true); do
+              echo "fuzzing $pkg $target for $FUZZTIME"
+              go test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime "$FUZZTIME"
+            done
+          done
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy -diff
+          (cd tools/pdseed && go mod tidy -diff)
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          working-directory: tools/pdseed
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: |
+          go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" -test ./...
+          (cd tools/pdseed && go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" -test ./...)
+      - name: osv-scanner
+        run: |
+          go run "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}" \
+            scan source --lockfile=go.mod --lockfile=tools/pdseed/go.mod
+      # Each operating system links different packages (wincred on Windows,
+      # dbus on Linux), so each one's build is checked.
+      - name: go-licenses
+        run: |
+          ignore=()
+          for module in $MPL_ALLOWED; do ignore+=(--ignore "$module"); done
+          go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
+          for goos in linux darwin windows; do
+            echo "licenses for $goos"
+            GOOS="$goos" go-licenses check ./... --allowed_licenses="$ALLOWED_LICENSES" "${ignore[@]}"
+            (cd tools/pdseed && GOOS="$goos" go-licenses check ./... --allowed_licenses="$ALLOWED_LICENSES")
+          done
+
+  testdata-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test ./internal/testkit -run '^TestTestdataIsClean$' -v

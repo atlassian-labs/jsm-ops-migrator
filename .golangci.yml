@@ -1,0 +1,132 @@
+version: "2"
+
+# The import and call rules below are also enforced by
+# internal/testkit/rules_test.go, which runs with plain `go test`, so they hold
+# on machines without golangci-lint. Keep the two in step.
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    - forbidigo
+  settings:
+    depguard:
+      rules:
+        network:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/httpx/*.go"
+            - "!**/internal/testkit/**"
+          deny:
+            - pkg: "net$"
+              desc: only internal/httpx makes network calls
+            - pkg: "net/http"
+              desc: only internal/httpx makes network calls
+            - pkg: "net/rpc"
+              desc: only internal/httpx makes network calls
+            - pkg: "net/smtp"
+              desc: only internal/httpx makes network calls
+            - pkg: "net/textproto"
+              desc: only internal/httpx makes network calls
+            - pkg: "crypto/tls"
+              desc: only internal/httpx makes network calls
+            - pkg: "golang.org/x/net"
+              desc: only internal/httpx makes network calls
+            - pkg: "github.com/hashicorp/go-retryablehttp"
+              desc: only internal/httpx makes network calls
+        httpx-root:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/pd/**"
+            - "!**/internal/jsm/**"
+            - "!**/internal/testkit/**"
+            - "!**/cmd/jsm-ops-migrator/**"
+          deny:
+            - pkg: "github.com/atlassian-labs/jsm-ops-migrator/internal/httpx$"
+              desc: only internal/pd and internal/jsm call APIs; use the httpx subpackages for types
+        cli:
+          files:
+            - "$all"
+            - "!**/cmd/jsm-ops-migrator/**"
+          deny:
+            - pkg: "github.com/atlassian-labs/jsm-ops-migrator/internal/cli$"
+              desc: only cmd/jsm-ops-migrator wires the commands
+        command-libraries:
+          files:
+            - "$all"
+            - "!**/internal/cli/**"
+          deny:
+            - pkg: "github.com/spf13/cobra"
+              desc: only internal/cli uses cobra
+            - pkg: "github.com/spf13/pflag"
+              desc: only internal/cli uses pflag
+            - pkg: "github.com/spf13/viper"
+              desc: only internal/cli uses viper
+        keychain:
+          files:
+            - "$all"
+            - "!**/internal/credentials/*.go"
+          deny:
+            - pkg: "github.com/zalando/go-keyring"
+              desc: only internal/credentials talks to the keychain
+        sqlite:
+          files:
+            - "$all"
+            - "!**/internal/store/*.go"
+          deny:
+            - pkg: "modernc.org/sqlite"
+              desc: only internal/store opens state.db
+        testkit:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/testkit/**"
+          deny:
+            - pkg: "github.com/atlassian-labs/jsm-ops-migrator/internal/testkit"
+              desc: testkit holds fakes and may read secrets; only tests import it
+        references-only:
+          files:
+            - "$all"
+          deny:
+            - pkg: "github.com/PagerDuty/go-pagerduty"
+              desc: a reference for request shapes, not a dependency
+            - pkg: "github.com/opsgenie/opsgenie-go-sdk-v2"
+              desc: targets the Opsgenie API, not JSM Ops
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^http\.(DefaultClient|DefaultTransport|Get|Head|Post|PostForm)$'
+          pkg: '^net/http$'
+          msg: use the configured httpx client
+        - pattern: '^fmt\.Print(f|ln)?$'
+          pkg: '^fmt$'
+          msg: write to the command's writers or the logger
+        - pattern: '^print(ln)?$'
+          msg: write to the command's writers or the logger
+        - pattern: '^log\.(Print|Fatal|Panic)(f|ln)?$'
+          pkg: '^log$'
+          msg: use the redacting slog logger
+        - pattern: '^os\.Exit$'
+          pkg: '^os$'
+          msg: only cmd/jsm-ops-migrator may exit
+        - pattern: '^credentials\.Secret\.Reveal$'
+          pkg: '^github.com/atlassian-labs/jsm-ops-migrator/internal/credentials$'
+          msg: only internal/credentials and internal/httpx may read a Secret
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [forbidigo]
+      - path: cmd/jsm-ops-migrator/[^/]+\.go$
+        linters: [forbidigo]
+        text: os\.Exit
+      # The same places internal/testkit/rules_test.go allows: credentials and
+      # testkit with their subpackages, httpx without them.
+      - path: (internal/credentials/|internal/testkit/|internal/httpx/[^/]+\.go$)
+        linters: [forbidigo]
+        text: Reveal
+
+formatters:
+  enable:
+    - gofmt
