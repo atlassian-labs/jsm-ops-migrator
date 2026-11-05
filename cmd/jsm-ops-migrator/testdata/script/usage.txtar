@@ -1,0 +1,13 @@
+# Usage errors explain themselves, print nothing on stdout and create nothing.
+env HOME=$WORK/home
+env USERPROFILE=$WORK/home
+
+! exec jsm-ops-migrator plan --only both
+stderr 'invalid value "both" for --only'
+stderr 'Run .jsm-ops-migrator plan --help. for usage'
+! stdout .
+
+! exec jsm-ops-migrator frobnicate
+stderr 'unknown command "frobnicate"'
+
+! exists $WORK/home/jsm-ops-migrator
