@@ -27,9 +27,10 @@ var secretKeys = map[string]bool{
 	"web_cal_url":         true,
 }
 
-// Suffixes catch names such as atlassian_api_token or org_secret. "_key" is not
-// one of them, because names such as item_key are ordinary identifiers.
-var secretSuffixes = []string{"_token", "_secret", "_password", "_passphrase"}
+// Suffixes catch names such as atlassian_api_token, org_api_key or
+// org_secret. "_key" alone is not one of them, because names such as item_key
+// are ordinary identifiers.
+var secretSuffixes = []string{"_token", "_secret", "_password", "_passphrase", "_api_key"}
 
 // personalKeys hold personal contact data: a PagerDuty contact method's
 // address, a JSM contact's to, phone numbers and device details.
