@@ -16,7 +16,7 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
 )
 
-const menuTitle = "PagerDuty Migration CLI"
+const menuTitle = "JSM Ops Migrator"
 
 var menuItems = []tui.MenuItem{
 	{Key: "plan", Label: "Plan", Description: "read PagerDuty and JSM and build a new plan"},
@@ -26,14 +26,14 @@ var menuItems = []tui.MenuItem{
 	{Key: "login", Label: "Login", Description: "store or change the credentials, site and organization"},
 }
 
-// MenuState is what the menu shows about the workspace. Foundation fills Dir,
-// Exists, Site and OrgID. Login and pre-flight sets CredentialsStored, and the
-// Run engine sets Plan and Run, through Options.DescribeWorkspace.
+// MenuState is what the menu shows about the workspace: where it is, the
+// saved site and organization, and whether every credential is available.
+// The Run engine sets Plan and Run through Options.DescribeWorkspace.
 type MenuState struct {
 	Dir               string
 	Exists            bool
 	Site, OrgID       string
-	CredentialsStored *bool // nil until Login and pre-flight can tell
+	CredentialsStored *bool // nil when it cannot be told without a passphrase or the keychain
 	Plan              *PlanStatus
 	Run               *RunStatus
 	Problem           string // set when the workspace cannot be read
@@ -99,27 +99,31 @@ func runMenu(ctx context.Context, args []string, r *runner, stdin io.Reader, std
 		// The command draws on the screen as usual, so it can still prompt
 		// and show progress; a copy of its output becomes the menu's result.
 		var captured bytes.Buffer
-		code, _ := executeOnce(ctx, append(slices.Clone(args), choice), stdin,
+		code, ran := executeOnce(ctx, append(slices.Clone(args), choice), stdin,
 			tui.Tee(stdout, &captured), tui.Tee(stderr, &captured), opts, b, h)
-		last = lastResult(choice, code, captured.String())
+		last = lastResult(choice, code, ran.summary, captured.String())
 	}
 }
 
-// lastResult is the block the menu shows about the action that just ran.
-func lastResult(choice string, code int, output string) []string {
+// lastResult is the block the menu shows about the action that just ran: the
+// command's summary, or else the end of what it printed.
+func lastResult(choice string, code int, summary []string, output string) []string {
 	head := "Last: " + menuLabel(choice) + " finished"
 	if code != ExitOK {
 		head = "Last: " + menuLabel(choice) + " failed"
 	}
+	if summary == nil {
+		summary = tui.LastLines(output, maxResultLines)
+	}
 	lines := []string{head}
-	for _, line := range tui.LastLines(output, maxResultLines) {
+	for _, line := range summary {
 		lines = append(lines, "  "+line)
 	}
 	return lines
 }
 
-// maxResultLines keeps the menu on one screen whatever a command printed;
-// everything it printed is also in its log file.
+// maxResultLines keeps the menu on one screen whatever a command without a
+// summary printed; what it wrote to stderr is also in its log file.
 const maxResultLines = 8
 
 func menuLabel(key string) string {
@@ -164,7 +168,15 @@ func (r *runner) menuState(ctx context.Context) MenuState {
 		s.Problem = credentials.RedactText(err.Error())
 		return s
 	}
-	s.Site, s.OrgID = cfg.Site, cfg.OrgID
+	// The header shows only what is saved, and so checked, never a --site or
+	// environment override for one run.
+	saved, err := LoadConfigFile(ws)
+	if err != nil {
+		s.Problem = credentials.RedactText(err.Error())
+		return s
+	}
+	s.Site, s.OrgID = saved.Site, saved.OrgID
+	s.CredentialsStored = credentialsStatus(ctx, ws, r.opts.Keychain)
 	if r.opts.DescribeWorkspace != nil {
 		r.opts.DescribeWorkspace(ctx, ws, cfg, &s)
 	}
@@ -185,16 +197,19 @@ func describeMenu(s MenuState) (lines []string, selected string) {
 	case s.Site == "":
 		return append(lines, "Not logged in yet: choose Login to start"), "login"
 	}
-	login := "Logged in to " + s.Site
+	where := s.Site
 	if s.OrgID != "" {
-		login += ", organization " + s.OrgID
+		where += ", organization " + s.OrgID
 	}
-	lines = append(lines, login)
+	if s.CredentialsStored != nil && !*s.CredentialsStored {
+		// Not "logged in" without the credentials; the cursor on Login says
+		// what to do next.
+		return append(lines, "Site "+where), "login"
+	}
+	lines = append(lines, "Logged in to "+where)
 
 	p, run := s.Plan, s.Run
 	switch {
-	case s.CredentialsStored != nil && !*s.CredentialsStored:
-		return append(lines, "Your credentials are missing: choose Login to store them again"), "login"
 	case run != nil && run.State == RunRunning:
 		return append(lines,
 			fmt.Sprintf("Apply of plan v%d is running in another window: %d of %d written", run.PlanVersion, run.Written, run.Total),

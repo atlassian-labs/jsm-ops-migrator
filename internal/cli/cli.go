@@ -15,17 +15,20 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
 )
 
-// Exit codes Foundation reserves. The Run engine defines the codes for
-// Blocked, Awaiting decision or credentials, Validation failed and Partially
+// Exit codes. ExitAwaitingInput means a credential or an answer is missing:
+// the command did what it could without it, and runs fully once it is given.
+// The Run engine adds the codes for Blocked, Validation failed and Partially
 // complete as error types that implement ExitCoder.
 const (
-	ExitOK    = 0
-	ExitError = 1
-	ExitUsage = 2
+	ExitOK            = 0
+	ExitError         = 1
+	ExitUsage         = 2
+	ExitAwaitingInput = 4
 )
 
 // ExitCoder is an error that chooses the process exit code.
@@ -37,10 +40,28 @@ type ExitCoder interface {
 // ErrNotImplemented is returned by command bodies that later tasks replace.
 var ErrNotImplemented = errors.New("not implemented yet")
 
+// awaitingInputError exits with ExitAwaitingInput.
+type awaitingInputError struct{ err error }
+
+func (e awaitingInputError) Error() string { return e.err.Error() }
+func (e awaitingInputError) Unwrap() error { return e.err }
+func (e awaitingInputError) ExitCode() int { return ExitAwaitingInput }
+
+func awaitingInput(err error) error { return awaitingInputError{err} }
+
 // Options are the seams cmd/jsm-ops-migrator wires and tests replace.
 type Options struct {
-	// NewKeyProvider returns the provider that protects state.db's data key.
-	NewKeyProvider func(env *Env) (store.KeyProvider, error)
+	// Keychain is the OS keychain, which holds each workspace's key and
+	// credentials. main passes credentials.OSKeychain; nil means there is
+	// none, as on a machine without a Secret Service.
+	Keychain credentials.Keychain
+	// NewKeyProvider overrides how state.db's data key is protected. Without
+	// it, a workspace uses the provider recorded in state.db, and a new one
+	// uses the keychain when it works and otherwise a passphrase.
+	NewKeyProvider func(ctx context.Context, env *Env) (store.KeyProvider, error)
+	// NewClients builds the API clients the checks use from the credentials
+	// being checked. Nil means preflight.Placeholders.
+	NewClients func(env *Env, creds credentials.Set) (preflight.Clients, error)
 	// RenderError prints an error that stopped a command. The default writes
 	// "Error: <message>" to stderr, so stdout carries only what a command
 	// renders.
@@ -51,8 +72,7 @@ type Options struct {
 	// context was canceled, so a command that does not stop can always be
 	// left. main passes a function that exits with code 130.
 	ForceExit func()
-	// DescribeWorkspace adds what later tasks know to the menu's status:
-	// Login and pre-flight whether the credentials are stored, the Run engine
+	// DescribeWorkspace adds what the Run engine knows to the menu's status:
 	// the latest plan and apply.
 	DescribeWorkspace func(ctx context.Context, ws *store.Workspace, cfg Config, s *MenuState)
 	// Now is the clock; nil means time.Now.
@@ -66,15 +86,18 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 }
 
 // hooks are the seams tests replace: whether a stream is a terminal, the
-// interactive menu, which needs one, and whether the accessible mode is on.
+// interactive menu and prompts, which need one, and whether the accessible
+// mode is on.
 type hooks struct {
 	isTerminal func(any) bool
 	menu       func(ctx context.Context, in io.Reader, out io.Writer, color bool, title string, status []string, items []tui.MenuItem, selected string) (string, error)
 	accessible func() bool
+	ask        func(ctx context.Context, in io.Reader, out io.Writer, color bool, heading string, qs []tui.Question) ([]string, error)
+	choose     func(ctx context.Context, in io.Reader, out io.Writer, color bool, title, description string, options []tui.Option, selected string) (string, error)
 }
 
 func defaultHooks() hooks {
-	return hooks{isTerminal: isTerminal, menu: tui.Menu, accessible: tui.Accessible}
+	return hooks{isTerminal: isTerminal, menu: tui.Menu, accessible: tui.Accessible, ask: tui.Ask, choose: tui.Choose}
 }
 
 func execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, opts Options, b bodies) int {
@@ -87,6 +110,9 @@ func executeWith(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
+	}
+	if opts.Keychain == nil {
+		opts.Keychain = noKeychain{}
 	}
 	code, r := executeOnce(ctx, args, stdin, stdout, stderr, opts, b, h)
 	if !r.wantMenu {
@@ -224,6 +250,7 @@ type runner struct {
 	interrupts *interrupter
 	started    bool
 	rendered   bool // the wrapper already printed the command's error
+	summary    []string
 
 	// Set when jsm-ops-migrator runs without a command in a terminal.
 	wantMenu  bool
@@ -243,14 +270,18 @@ type commandSpec struct {
 	create   bool // create the workspace when it is missing
 	lock     bool // take the workspace lock for the whole command
 	graceful bool // the first Ctrl+C asks the command to stop, the second cancels
+	// absent, when set, is printed instead of an error when the workspace
+	// does not exist, and the command succeeds without running.
+	absent string
 }
 
 var (
-	specLogin  = commandSpec{name: "login", create: true, lock: true}
-	specPlan   = commandSpec{name: "plan", create: true, lock: true}
-	specApply  = commandSpec{name: "apply", lock: true, graceful: true}
-	specPause  = commandSpec{name: "pause"} // never waits for a running apply's lock
-	specResume = commandSpec{name: "resume", lock: true, graceful: true}
+	specLogin      = commandSpec{name: "login", create: true, lock: true}
+	specLoginClear = commandSpec{name: "login", lock: true, absent: "No credentials are stored in %s."}
+	specPlan       = commandSpec{name: "plan", create: true, lock: true}
+	specApply      = commandSpec{name: "apply", lock: true, graceful: true}
+	specPause      = commandSpec{name: "pause"} // never waits for a running apply's lock
+	specResume     = commandSpec{name: "resume", lock: true, graceful: true}
 )
 
 // wrap prepares the workspace, logger, config and Env, then runs the body.
@@ -264,6 +295,10 @@ func (r *runner) wrap(spec commandSpec, body func(context.Context, *Env) error) 
 			return err
 		}
 		ws, err := store.OpenWorkspace(dir, spec.create)
+		if errors.Is(err, store.ErrWorkspaceNotFound) && spec.absent != "" {
+			_, err := fmt.Fprintf(r.stdout, spec.absent+"\n", displayPath(dir))
+			return err
+		}
 		if errors.Is(err, store.ErrWorkspaceNotFound) && !spec.create {
 			return fmt.Errorf("%w; run 'jsm-ops-migrator login' first", err)
 		}
@@ -311,7 +346,13 @@ func (r *runner) wrap(spec commandSpec, body func(context.Context, *Env) error) 
 			Stderr:           stderr,
 			Interrupted:      r.interrupts.ch,
 			RequestInterrupt: r.interrupts.interrupt,
+			Now:              r.opts.Now,
+			keychain:         r.opts.Keychain,
 			newKeyProvider:   r.opts.NewKeyProvider,
+			newClients:       r.opts.NewClients,
+			ask:              r.hooks.ask,
+			choose:           r.hooks.choose,
+			setSummary:       func(lines []string) { r.summary = lines },
 		}
 		return renderHere(body(cmd.Context(), env))
 	}

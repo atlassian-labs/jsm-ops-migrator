@@ -37,7 +37,22 @@ go test ./internal/testkit -run '^TestTestdataIsClean$'       # secrets and phon
 
 CI also runs the tests on macOS, Windows and Linux, builds six targets without
 cgo and fuzzes every `Fuzz` function. Set `JSM_OPS_MIGRATOR_TEST_REAL_KEYCHAIN=1` to
-run the keychain test against the real OS keychain.
+run the keychain test against the real OS keychain. No other test may touch
+it: the binary's tests in `cmd/jsm-ops-migrator` use a file-backed keychain from
+`testkit`, and the `internal` tests use `testkit.FakeKeychain`. A script that sets
+`JSM_OPS_MIGRATOR_TEST_APIS=healthy` runs the binary against `testkit`'s fake
+APIs instead of the placeholders.
+
+Credentials come from masked prompts, `login --stdin` or these environment
+variables, never from flags: `JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY`,
+`JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL`, `JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN` and
+`JSM_OPS_MIGRATOR_ORG_API_KEY`. On a machine without a keychain,
+`JSM_OPS_MIGRATOR_PASSPHRASE` protects the workspace instead. Until the API
+clients exist, `cmd/jsm-ops-migrator` wires `preflight.Placeholders`, so every
+check that needs an API reports "not checked". `login` stores only a credential,
+and saves only a site and organization, whose check passed, so for now it
+stores and saves none. A site in `config.yaml` without its cloudId was never
+checked and counts as not saved.
 
 ## Rules
 

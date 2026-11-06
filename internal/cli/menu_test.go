@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
@@ -33,7 +34,7 @@ func (m *scriptedMenu) menu(_ context.Context, _ io.Reader, _ io.Writer, _ bool,
 	for _, it := range items {
 		keys = append(keys, it.Key)
 	}
-	if title != "PagerDuty Migration CLI" || strings.Join(keys, ",") != "plan,apply,resume,pause,login" {
+	if title != "JSM Ops Migrator" || strings.Join(keys, ",") != "plan,apply,resume,pause,login" {
 		return "", errors.New("unexpected menu: " + title + " " + strings.Join(keys, ","))
 	}
 	if len(m.choices) == 0 {
@@ -52,7 +53,10 @@ func runMenuSession(t *testing.T, b bodies, opts Options, m *scriptedMenu, args 
 func runMenuSessionWith(t *testing.T, b bodies, opts Options, m *scriptedMenu, accessible bool, args ...string) result {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	opts.NewKeyProvider = func(*Env) (store.KeyProvider, error) { return testkit.NewMemoryKeyProvider(), nil }
+	opts.NewKeyProvider = func(context.Context, *Env) (store.KeyProvider, error) { return testkit.NewMemoryKeyProvider(), nil }
+	if opts.Keychain == nil {
+		opts.Keychain = testkit.NewFakeKeychain()
+	}
 	h := hooks{isTerminal: func(any) bool { return true }, menu: m.menu, accessible: func() bool { return accessible }}
 	code := executeWith(context.Background(), args, strings.NewReader(""), &out, &errOut, opts, b, h)
 	return result{code, out.String(), errOut.String()}
@@ -62,7 +66,7 @@ const enterFullScreen, leaveFullScreen = "\x1b[?1049h", "\x1b[?1049l"
 
 func TestMenuShowsTheLastResult(t *testing.T) {
 	inTempDir(t)
-	b := defaultBodies()
+	b := stubBodies()
 	b.login = func(_ context.Context, env *Env, _ LoginFlags) error {
 		_, _ = io.WriteString(env.Stdout, "Stored the credentials\n")
 		return nil
@@ -83,10 +87,30 @@ func TestMenuShowsTheLastResult(t *testing.T) {
 	}
 }
 
+// A command's summary replaces its output, which was written for a terminal
+// of its own.
+func TestMenuShowsTheSummaryInsteadOfTheOutput(t *testing.T) {
+	inTempDir(t)
+	b := stubBodies()
+	b.login = func(_ context.Context, env *Env, _ LoginFlags) error {
+		_, _ = io.WriteString(env.Stdout, "Login checks\n  a long table\n")
+		env.summarize([]string{"All checks passed", "Stored the PagerDuty API key"})
+		return nil
+	}
+	m := &scriptedMenu{choices: []string{"login"}}
+	if r := runMenuSession(t, b, Options{}, m); r.code != ExitOK || len(m.shown) != 2 {
+		t.Fatalf("exit %d, menu shown %d times", r.code, len(m.shown))
+	}
+	got := strings.Join(m.shown[1], "\n")
+	if !strings.HasSuffix(got, "\n\nLast: Login finished\n  All checks passed\n  Stored the PagerDuty API key") || strings.Contains(got, "a long table") {
+		t.Errorf("after login: %q", got)
+	}
+}
+
 func TestMenuSessionUsesTheFullScreen(t *testing.T) {
 	inTempDir(t)
 	m := &scriptedMenu{choices: []string{"plan"}}
-	r := runMenuSession(t, defaultBodies(), Options{}, m)
+	r := runMenuSession(t, stubBodies(), Options{}, m)
 	enter, leave := strings.Index(r.stdout, enterFullScreen), strings.LastIndex(r.stdout, leaveFullScreen)
 	if enter != 0 || leave < 0 || leave != len(r.stdout)-len(leaveFullScreen) {
 		t.Errorf("the session must start and end the full screen: %q", r.stdout)
@@ -94,7 +118,7 @@ func TestMenuSessionUsesTheFullScreen(t *testing.T) {
 	if strings.Count(r.stdout, enterFullScreen) != 1 {
 		t.Errorf("one full screen for the whole session: %q", r.stdout)
 	}
-	accessible := runMenuSessionWith(t, defaultBodies(), Options{}, &scriptedMenu{choices: []string{"plan"}}, true)
+	accessible := runMenuSessionWith(t, stubBodies(), Options{}, &scriptedMenu{choices: []string{"plan"}}, true)
 	if strings.Contains(accessible.stdout, enterFullScreen) || strings.Contains(accessible.stdout, "\x1b[2J") {
 		t.Errorf("accessible mode must never switch or clear the screen: %q", accessible.stdout)
 	}
@@ -121,10 +145,10 @@ func TestForcedExitRestoresTheScreen(t *testing.T) {
 	var restoredFirst atomic.Bool
 	opts := Options{
 		Interrupts:     sigs,
-		NewKeyProvider: func(*Env) (store.KeyProvider, error) { return testkit.NewMemoryKeyProvider(), nil },
+		NewKeyProvider: func(context.Context, *Env) (store.KeyProvider, error) { return testkit.NewMemoryKeyProvider(), nil },
 		ForceExit:      func() { restoredFirst.Store(strings.HasSuffix(out.String(), leaveFullScreen)) },
 	}
-	b := defaultBodies()
+	b := stubBodies()
 	b.plan = func(ctx context.Context, _ *Env, _ PlanFlags) error {
 		sigs <- os.Interrupt // cancels plan
 		<-ctx.Done()
@@ -144,23 +168,33 @@ func TestMenuOnlyInATerminal(t *testing.T) {
 	inTempDir(t)
 	for _, args := range [][]string{{"--non-interactive"}, {"--output", "json"}} {
 		m := &scriptedMenu{}
-		r := runMenuSession(t, defaultBodies(), Options{}, m, args...)
+		r := runMenuSession(t, stubBodies(), Options{}, m, args...)
 		if r.code != ExitOK || len(m.shown) != 0 || !strings.Contains(r.stdout, "Available Commands") {
 			t.Errorf("%v: exit %d, menu shown %d times, stdout %q", args, r.code, len(m.shown), r.stdout)
 		}
 	}
-	if r := run(t, defaultBodies(), Options{}); !strings.Contains(r.stdout, "Available Commands") {
+	if r := run(t, stubBodies(), Options{}); !strings.Contains(r.stdout, "Available Commands") {
 		t.Errorf("without a terminal jsm-ops-migrator must print the help: %q", r.stdout)
+	}
+}
+
+// withCredentialsInEnv sets every credential in the environment, as a script
+// would, so the menu counts them as available.
+func withCredentialsInEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range credentials.Kinds {
+		t.Setenv(k.EnvVar(), "env-value-"+string(k))
 	}
 }
 
 func TestMenuRunsChosenCommandsUntilQuit(t *testing.T) {
 	dir := filepath.Join(inTempDir(t), "migration")
+	withCredentialsInEnv(t)
 	var ran []string
-	b := defaultBodies()
+	b := stubBodies()
 	b.login = func(_ context.Context, env *Env, _ LoginFlags) error {
 		ran = append(ran, "login:"+env.Workspace.Dir())
-		return SaveConfig(env.Workspace, Config{Site: "acme.atlassian.net", OrgID: "org-1"})
+		return SaveConfig(env.Workspace, Config{Site: "acme.atlassian.net", CloudID: "cloud-1", OrgID: "org-1"})
 	}
 	b.plan = func(_ context.Context, env *Env, _ PlanFlags) error {
 		ran = append(ran, "plan:"+env.Config.Site)
@@ -189,6 +223,16 @@ func TestMenuRunsChosenCommandsUntilQuit(t *testing.T) {
 	}
 }
 
+// Without the credentials the header shows the site, not "Logged in", and
+// nothing else: the cursor on Login says what to do next.
+func TestMenuWithoutCredentialsShowsOnlyTheSite(t *testing.T) {
+	no := false
+	lines, selected := describeMenu(MenuState{Dir: "/w", Exists: true, Site: "acme.atlassian.net", OrgID: "o1", CredentialsStored: &no})
+	if len(lines) != 2 || lines[1] != "Site acme.atlassian.net, organization o1" || selected != "login" {
+		t.Errorf("lines %q, selected %q", lines, selected)
+	}
+}
+
 func TestMenuStatusAtEveryStep(t *testing.T) {
 	no, yes := false, true
 	base := MenuState{Dir: "/w", Exists: true, Site: "acme.atlassian.net", OrgID: "o1"}
@@ -203,7 +247,8 @@ func TestMenuStatusAtEveryStep(t *testing.T) {
 		{"nothing yet", MenuState{Dir: "/w"}, "Nothing set up yet: choose Login to start", "login"},
 		{"workspace without login", MenuState{Dir: "/w", Exists: true}, "Not logged in yet: choose Login to start", "login"},
 		{"after login", base, "Next: choose Plan to read PagerDuty and JSM", "plan"},
-		{"credentials gone", with(func(s *MenuState) { s.CredentialsStored = &no }), "Your credentials are missing", "login"},
+		{"credentials gone", with(func(s *MenuState) { s.CredentialsStored = &no }),
+			"Site acme.atlassian.net, organization o1", "login"},
 		{"credentials stored", with(func(s *MenuState) { s.CredentialsStored = &yes }), "Next: choose Plan", "plan"},
 		{"plan with blockers", with(func(s *MenuState) {
 			s.Plan = &PlanStatus{Version: 2, Blockers: 1, Dir: "/w/artifacts/plan-v2"}
@@ -236,17 +281,36 @@ func TestMenuStatusAtEveryStep(t *testing.T) {
 
 func TestMenuStatusComesFromLaterTasks(t *testing.T) {
 	dir := inTempDir(t)
+	withCredentialsInEnv(t)
 	ws, _ := store.OpenWorkspace(dir, true)
-	if err := SaveConfig(ws, Config{Site: "acme.atlassian.net"}); err != nil {
+	if err := SaveConfig(ws, Config{Site: "acme.atlassian.net", CloudID: "cloud-1"}); err != nil {
 		t.Fatal(err)
 	}
 	opts := Options{DescribeWorkspace: func(_ context.Context, _ *store.Workspace, _ Config, s *MenuState) {
 		s.Plan = &PlanStatus{Version: 1, Changes: 5, Dir: filepath.Join(dir, "artifacts", "plan-v1")}
 	}}
 	m := &scriptedMenu{}
-	runMenuSession(t, defaultBodies(), opts, m)
+	runMenuSession(t, stubBodies(), opts, m)
 	if len(m.shown) != 1 || !strings.Contains(strings.Join(m.shown[0], "\n"), "Plan v1 is ready: 5 changes") || m.selected[0] != "apply" {
 		t.Errorf("shown %v, selected %v", m.shown, m.selected)
+	}
+}
+
+// The header shows only a saved, checked site: not one saved without its
+// cloudId, and not an override for one run.
+func TestMenuShowsOnlyACheckedSavedSite(t *testing.T) {
+	dir := inTempDir(t)
+	withCredentialsInEnv(t)
+	t.Setenv(envPrefix+"_SITE", "override.atlassian.net")
+	ws, _ := store.OpenWorkspace(dir, true)
+	if err := SaveConfig(ws, Config{Site: "typo.atlassian.netl", OrgID: "org-1"}); err != nil {
+		t.Fatal(err)
+	}
+	m := &scriptedMenu{}
+	runMenuSession(t, stubBodies(), Options{}, m)
+	got := strings.Join(m.shown[0], "\n")
+	if !strings.Contains(got, "Not logged in yet: choose Login to start") || strings.Contains(got, "typo") || strings.Contains(got, "override") {
+		t.Errorf("shown %q", got)
 	}
 }
 
@@ -254,7 +318,7 @@ func TestMenuCtrlCStopsOnlyTheCommand(t *testing.T) {
 	inTempDir(t)
 	sigs := make(chan os.Signal, 2)
 	var planRuns int
-	b := defaultBodies()
+	b := stubBodies()
 	b.plan = func(ctx context.Context, _ *Env, _ PlanFlags) error {
 		planRuns++
 		if planRuns == 1 {
@@ -282,7 +346,7 @@ func TestMenuDropsAStaleCtrlC(t *testing.T) {
 	inTempDir(t)
 	sigs := make(chan os.Signal, 2)
 	sigs <- os.Interrupt // arrived while the menu was not reading keys
-	b := defaultBodies()
+	b := stubBodies()
 	b.plan = func(ctx context.Context, _ *Env, _ PlanFlags) error {
 		select {
 		case <-ctx.Done():
