@@ -4,7 +4,7 @@ env HOME=$WORK/home
 env USERPROFILE=$WORK/home
 
 ! exec jsm-ops-migrator plan
-stderr 'plan: not implemented yet'
+stderr 'plan: missing: PagerDuty API key'
 exists $WORK/home/jsm-ops-migrator/artifacts
 exists $WORK/home/jsm-ops-migrator/lock
 
@@ -14,5 +14,5 @@ stderr 'run .jsm-ops-migrator login. first'
 
 env JSM_OPS_MIGRATOR_WORKSPACE=$WORK/from-env
 ! exec jsm-ops-migrator login
-stderr 'login: not implemented yet'
+stderr 'login: missing: PagerDuty API key'
 exists $WORK/from-env/artifacts

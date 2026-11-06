@@ -1,0 +1,85 @@
+# Without a terminal, login takes the credentials from the environment or from
+# --stdin, never from flags, and stores in the keychain the ones whose check
+# passed.
+env HOME=$WORK/home
+env USERPROFILE=$WORK/home
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+env JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=operator@example.com
+env JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN=atl-canary-0123456789
+env JSM_OPS_MIGRATOR_ORG_API_KEY=org-canary-0123456789
+
+# The API clients are placeholders for now, so no check can run, and nothing
+# is stored or saved. Login still finishes.
+exec jsm-ops-migrator login --site ACME --org-id org-1
+stdout 'PagerDuty API key +not checked$'
+stdout 'PagerDuty API key, Site, Org API key and Org admin: the API clients are not built yet.'
+stdout 'Not stored, because the check could not run yet: PagerDuty API key, Atlassian account email, Atlassian API token and org API key.'
+stdout 'Not saved, because the check did not pass: site acme.atlassian.net, organization org-1.'
+! stdout 'canary'
+! stdout 'operator@example.com'
+! stderr .
+! exists $WORK/home/jsm-ops-migrator/config.yaml
+! grep 'canary' $WORK/keychain.json
+
+# With APIs that accept them, the checks pass and the credentials are stored.
+env JSM_OPS_MIGRATOR_TEST_APIS=healthy
+exec jsm-ops-migrator login --site ACME --org-id org-1
+stdout 'PagerDuty API key .*ok'
+stdout 'Stored in the OS keychain: PagerDuty API key, Atlassian account email, Atlassian API token and org API key.'
+stdout 'Saved in .*config.yaml: site acme.atlassian.net, cloudId cloud-1, organization org-1.'
+grep 'site: acme.atlassian.net' $WORK/home/jsm-ops-migrator/config.yaml
+! grep 'canary' $WORK/home/jsm-ops-migrator/config.yaml
+! stdout 'canary'
+! stdout 'operator@example.com'
+! stderr .
+grep 'pd-canary-0123456789' $WORK/keychain.json
+
+# plan uses the stored credentials and asks for the JSM plan, which no API
+# reports: without it, plan waits for input (exit 4).
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=
+env JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=
+env JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN=
+env JSM_OPS_MIGRATOR_ORG_API_KEY=
+! exec jsm-ops-migrator plan
+stdout 'JSM plan .*missing'
+stderr 'plan: missing: JSM plan'
+! exec jsm-ops-migrator plan --jsm-plan premium
+stdout 'Secret storage .*ok .*kept in the OS keychain'
+stdout 'JSM plan .*ok .*premium'
+stderr 'plan: reading PagerDuty and JSM is not implemented yet'
+! stdout 'canary'
+
+# --clear removes them, and plan then reports every credential as missing.
+exec jsm-ops-migrator login --clear
+stdout 'Removed the stored credentials'
+! grep 'canary' $WORK/keychain.json
+! exec jsm-ops-migrator plan --jsm-plan premium
+stderr 'plan: missing: PagerDuty API key, Atlassian email and API token, Org API key'
+
+# --stdin reads NAME=value lines, for a secrets manager to pipe in.
+stdin creds.env
+exec jsm-ops-migrator login --stdin
+stdout 'Stored in the OS keychain: PagerDuty API key, Atlassian account email, Atlassian API token and org API key.'
+! stdout 'canary'
+
+# A bad line names its line number, never the value on it.
+stdin bad.env
+! exec jsm-ops-migrator login --stdin
+stderr 'line 2: want NAME=value'
+! stderr 'canary'
+
+# Clearing twice, or a workspace that does not exist, is fine.
+exec jsm-ops-migrator login --clear
+exec jsm-ops-migrator login --clear --workspace $WORK/none
+stdout 'No credentials are stored'
+! exists $WORK/none
+
+-- creds.env --
+# from a secrets manager
+JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+export JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=operator@example.com
+JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN="atl-canary-0123456789"
+JSM_OPS_MIGRATOR_ORG_API_KEY='org-canary-0123456789'
+-- bad.env --
+JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+pd-canary-pasted-alone

@@ -1,0 +1,44 @@
+# On a machine without a keychain, a new workspace is protected by a
+# passphrase, but only when JSM_OPS_MIGRATOR_PASSPHRASE says so: the CLI never
+# falls back silently. The credentials then go in credentials.enc, encrypted.
+env HOME=$WORK/home
+env USERPROFILE=$WORK/home
+env JSM_OPS_MIGRATOR_TEST_KEYCHAIN=
+env JSM_OPS_MIGRATOR_TEST_APIS=healthy
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+
+! exec jsm-ops-migrator login
+stderr 'keychain cannot be used .*set JSM_OPS_MIGRATOR_PASSPHRASE'
+! exists $WORK/home/jsm-ops-migrator/state.db
+
+env JSM_OPS_MIGRATOR_PASSPHRASE='correct horse battery staple'
+! exec jsm-ops-migrator login
+stdout 'Stored in credentials.enc: PagerDuty API key.'
+stderr 'login: missing'
+exists $WORK/home/jsm-ops-migrator/credentials.enc
+! grep 'canary' $WORK/home/jsm-ops-migrator/credentials.enc
+
+# The passphrase is never shown or kept anywhere in the workspace.
+! stdout 'horse'
+! stderr 'horse'
+! grep 'horse' $WORK/home/jsm-ops-migrator/credentials.enc
+! grep 'horse' $WORK/home/jsm-ops-migrator/state.db
+
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=
+! exec jsm-ops-migrator plan --only pagerduty
+stdout 'Secret storage .*ok .*kept in credentials.enc'
+stdout 'PagerDuty API key .*ok'
+stderr 'plan: reading PagerDuty and JSM is not implemented yet'
+
+env JSM_OPS_MIGRATOR_PASSPHRASE='a different passphrase'
+! exec jsm-ops-migrator plan --only pagerduty
+stderr 'the passphrase is wrong'
+! stderr 'different'
+
+env JSM_OPS_MIGRATOR_PASSPHRASE=
+! exec jsm-ops-migrator plan --only pagerduty
+stderr 'protected by a passphrase: set JSM_OPS_MIGRATOR_PASSPHRASE'
+
+# --clear needs no passphrase.
+exec jsm-ops-migrator login --clear
+! exists $WORK/home/jsm-ops-migrator/credentials.enc

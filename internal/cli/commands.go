@@ -2,10 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 )
 
 type globalFlags struct {
@@ -16,9 +20,12 @@ type globalFlags struct {
 	noColor        bool
 }
 
-// LoginFlags are the login command's own flags. Login and pre-flight adds its
-// fields here.
-type LoginFlags struct{ Clear bool }
+// LoginFlags are the login command's own flags.
+type LoginFlags struct {
+	Clear bool
+	// Stdin reads the credentials as NAME=value lines from standard input.
+	Stdin bool
+}
 
 // PlanFlags are the plan command's own flags.
 type PlanFlags struct{ Only string }
@@ -95,12 +102,32 @@ func (r *runner) newRootCommand() *cobra.Command {
 	login := &cobra.Command{
 		Use:   "login",
 		Short: "Store the credentials and the site and organization to migrate into",
-		Args:  cobra.NoArgs,
-		RunE: r.wrap(specLogin, func(ctx context.Context, env *Env) error {
-			return r.bodies.login(ctx, env, r.login)
-		}),
+		Long: "Store the credentials and the site and organization to migrate into.\n\n" +
+			"In a terminal, login asks for each credential with a masked prompt. Scripts set\n" +
+			"them in the environment, or pipe them as NAME=value lines with --stdin:\n\n" +
+			envVarHelp() + "\n\n" +
+			"Each credential is checked before it is stored in the OS keychain. On a machine\n" +
+			"without one, the workspace is protected by a passphrase (" + PassphraseEnvVar + ")\n" +
+			"and the credentials are kept in an encrypted file. Credentials are never flags.",
+		Args: cobra.NoArgs,
+		PreRunE: func(*cobra.Command, []string) error {
+			if r.login.Clear && r.login.Stdin {
+				return errors.New("--clear and --stdin cannot be used together")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			spec := specLogin
+			if r.login.Clear {
+				spec = specLoginClear
+			}
+			return r.wrap(spec, func(ctx context.Context, env *Env) error {
+				return r.bodies.login(ctx, env, r.login)
+			})(cmd, args)
+		},
 	}
 	login.Flags().BoolVar(&r.login.Clear, "clear", false, "remove the stored credentials")
+	login.Flags().BoolVar(&r.login.Stdin, "stdin", false, "read the credentials as NAME=value lines from standard input")
 
 	plan := &cobra.Command{
 		Use:   "plan",
@@ -157,10 +184,16 @@ func oneOf(flag, value string, allowed []string) error {
 	return fmt.Errorf("invalid value %q for %s: want one of %v", value, flag, named)
 }
 
+func envVarHelp() string {
+	lines := make([]string, len(credentials.Kinds))
+	for i, k := range credentials.Kinds {
+		lines[i] = fmt.Sprintf("  %-34s %s", k.EnvVar(), k.Label())
+	}
+	return strings.Join(lines, "\n")
+}
+
 func notImplemented(command string) error { return fmt.Errorf("%s: %w", command, ErrNotImplemented) }
 
-func runLogin(context.Context, *Env, LoginFlags) error   { return notImplemented("login") }
-func runPlan(context.Context, *Env, PlanFlags) error     { return notImplemented("plan") }
 func runApply(context.Context, *Env, ApplyFlags) error   { return notImplemented("apply") }
 func runPause(context.Context, *Env, PauseFlags) error   { return notImplemented("pause") }
 func runResume(context.Context, *Env, ResumeFlags) error { return notImplemented("resume") }

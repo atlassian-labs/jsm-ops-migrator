@@ -29,6 +29,9 @@ type Config struct {
 	CloudID            string `mapstructure:"cloud_id" yaml:"cloud_id,omitempty"`
 	OrgID              string `mapstructure:"org_id" yaml:"org_id,omitempty"`
 	PagerDutySubdomain string `mapstructure:"pagerduty_subdomain" yaml:"pagerduty_subdomain,omitempty"`
+	// JSMPlan is the site's JSM plan as the operator states it; no API
+	// reports it.
+	JSMPlan string `mapstructure:"jsm_plan" yaml:"jsm_plan,omitempty"`
 }
 
 type configKey struct{ key, flag, usage string }
@@ -39,6 +42,7 @@ var configKeys = []configKey{
 	{"cloud_id", "cloud-id", "cloudId of the site (overrides the workspace config)"},
 	{"org_id", "org-id", "Atlassian organization ID (overrides the workspace config)"},
 	{"pagerduty_subdomain", "pagerduty-subdomain", "PagerDuty subdomain (overrides the workspace config)"},
+	{"jsm_plan", "jsm-plan", "the site's JSM plan: free, standard, premium or enterprise (overrides the workspace config)"},
 }
 
 // loadConfig resolves the settings: the file, then the environment, then the
@@ -49,15 +53,18 @@ func loadConfig(ws *store.Workspace, flags *pflag.FlagSet) (Config, error) {
 	// never see each other's settings.
 	v := viper.New()
 	v.SetConfigType("yaml")
-	data, err := os.ReadFile(ws.ConfigPath())
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
+	// The file goes through LoadConfigFile, so a site saved without its
+	// cloudId is dropped here too.
+	saved, err := LoadConfigFile(ws)
+	if err != nil {
 		return Config{}, err
-	default:
-		if err := v.ReadConfig(bytes.NewReader(data)); err != nil {
-			return Config{}, fmt.Errorf("reading %s: %w", ws.ConfigPath(), err)
-		}
+	}
+	data, err := yaml.Marshal(saved)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := v.ReadConfig(bytes.NewReader(data)); err != nil {
+		return Config{}, fmt.Errorf("reading %s: %w", ws.ConfigPath(), err)
 	}
 	for _, k := range configKeys {
 		if err := v.BindEnv(k.key, envPrefix+"_"+strings.ToUpper(k.key)); err != nil {
@@ -78,6 +85,11 @@ func loadConfig(ws *store.Workspace, flags *pflag.FlagSet) (Config, error) {
 
 // LoadConfigFile returns only what config.yaml holds, without environment or
 // flag overrides, for code that changes a setting and saves the file back.
+//
+// login saves a site only after it gave its cloudId, and saves both together.
+// A site without one was never checked (typed into the file, or saved by an
+// earlier version), so it counts as not saved: the menu does not show it and
+// plan does not use it. The next save leaves it out of the file.
 func LoadConfigFile(ws *store.Workspace) (Config, error) {
 	data, err := os.ReadFile(ws.ConfigPath())
 	if errors.Is(err, fs.ErrNotExist) {
@@ -91,6 +103,9 @@ func LoadConfigFile(ws *store.Workspace) (Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("%s: %w", ws.ConfigPath(), err)
+	}
+	if c.CloudID == "" {
+		c.Site = ""
 	}
 	return c, nil
 }

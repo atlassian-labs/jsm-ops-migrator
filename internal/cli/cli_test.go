@@ -32,7 +32,10 @@ func run(t *testing.T, b bodies, opts Options, args ...string) result {
 	t.Helper()
 	var out, errOut bytes.Buffer
 	if opts.NewKeyProvider == nil {
-		opts.NewKeyProvider = func(*Env) (store.KeyProvider, error) { return testkit.NewMemoryKeyProvider(), nil }
+		opts.NewKeyProvider = func(context.Context, *Env) (store.KeyProvider, error) { return testkit.NewMemoryKeyProvider(), nil }
+	}
+	if opts.Keychain == nil {
+		opts.Keychain = testkit.NewFakeKeychain()
 	}
 	code := execute(context.Background(), args, strings.NewReader(""), &out, &errOut, opts, b)
 	return result{code, out.String(), errOut.String()}
@@ -111,10 +114,19 @@ func TestUsageErrors(t *testing.T) {
 	}
 }
 
+// stubBodies replace login and plan with stubs, for tests about the command
+// machinery rather than what the commands do.
+func stubBodies() bodies {
+	b := defaultBodies()
+	b.login = func(context.Context, *Env, LoginFlags) error { return notImplemented("login") }
+	b.plan = func(context.Context, *Env, PlanFlags) error { return notImplemented("plan") }
+	return b
+}
+
 func TestStubBodiesAreNotImplemented(t *testing.T) {
 	inTempDir(t)
 	for _, c := range []string{"login", "plan", "apply", "pause", "resume"} {
-		r := run(t, defaultBodies(), Options{}, c)
+		r := run(t, stubBodies(), Options{}, c)
 		if r.code != ExitError || !strings.Contains(r.stderr, c+": not implemented yet") {
 			t.Errorf("%s: exit %d, stderr %q", c, r.code, r.stderr)
 		}
@@ -132,8 +144,8 @@ func TestCommandsWithoutAWorkspace(t *testing.T) {
 	if len(entries(t, dir)) != 0 {
 		t.Errorf("created files: %v", entries(t, dir))
 	}
-	if r := run(t, defaultBodies(), Options{}, "login"); r.code != ExitError {
-		t.Fatalf("login: exit %d", r.code)
+	if r := run(t, defaultBodies(), Options{}, "login"); r.code != ExitAwaitingInput {
+		t.Fatalf("login without credentials: exit %d, stderr %q", r.code, r.stderr)
 	}
 	if _, err := os.Stat(filepath.Join(dir, store.ArtifactsDir)); err != nil {
 		t.Errorf("login must create the workspace: %v", err)
@@ -186,7 +198,7 @@ func TestLockIsHeldExceptForPause(t *testing.T) {
 	defer func() { _ = ws.Unlock() }()
 
 	var paused bool
-	b := defaultBodies()
+	b := stubBodies()
 	b.pause = func(context.Context, *Env, PauseFlags) error { paused = true; return nil }
 	for _, c := range []string{"login", "plan", "apply", "resume"} {
 		if r := run(t, b, Options{}, c); r.code != ExitError || !strings.Contains(r.stderr, "another jsm-ops-migrator command") {
@@ -456,7 +468,7 @@ func TestOpenStoreBuildsTheKeyProviderOnce(t *testing.T) {
 	inTempDir(t)
 	var built int
 	kp := testkit.NewMemoryKeyProvider()
-	opts := Options{NewKeyProvider: func(*Env) (store.KeyProvider, error) { built++; return kp, nil }}
+	opts := Options{NewKeyProvider: func(context.Context, *Env) (store.KeyProvider, error) { built++; return kp, nil }}
 	b := defaultBodies()
 	b.plan = func(ctx context.Context, env *Env, _ PlanFlags) error {
 		for range 2 {
