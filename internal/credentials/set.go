@@ -127,6 +127,20 @@ func (s Set) copyFrom(o Set, k Kind) Set {
 	return s
 }
 
+func (s Set) value(k Kind) string {
+	switch k {
+	case PagerDutyKey:
+		return s.PagerDutyKey.Reveal()
+	case AtlassianEmail:
+		return s.AtlassianEmail.Value()
+	case AtlassianToken:
+		return s.AtlassianToken.Reveal()
+	case OrgAPIKey:
+		return s.OrgAPIKey.Reveal()
+	}
+	return ""
+}
+
 // FromEnv returns the credentials set in the environment, read with getenv,
 // and which kinds came from it.
 func FromEnv(getenv func(string) string) (Set, []Kind) {
