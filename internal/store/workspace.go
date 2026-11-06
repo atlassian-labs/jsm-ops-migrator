@@ -197,6 +197,28 @@ func (w *Workspace) WriteFileAtomic(name string, data []byte) error {
 	return writeAtomic(w.dir, name, data)
 }
 
+// ReadFile reads one of the known root files. A missing file returns an error
+// that wraps fs.ErrNotExist.
+func (w *Workspace) ReadFile(name string) ([]byte, error) {
+	if !rootFiles[name] {
+		return nil, fmt.Errorf("ReadFile: %q is not a workspace root file", name)
+	}
+	return os.ReadFile(filepath.Join(w.dir, name))
+}
+
+// RemoveFile removes one of the known root files. Removing a missing file
+// succeeds.
+func (w *Workspace) RemoveFile(name string) error {
+	if !rootFiles[name] {
+		return fmt.Errorf("RemoveFile: %q is not a workspace root file", name)
+	}
+	err := retryRename(func() error { return os.Remove(filepath.Join(w.dir, name)) })
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 func writeAtomic(dir, name string, data []byte) error {
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {

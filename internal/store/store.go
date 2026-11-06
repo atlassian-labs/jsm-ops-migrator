@@ -58,6 +58,7 @@ type Store struct {
 	cipher        *fieldCipher
 	dataKey       []byte
 	workspaceID   string
+	keyProvider   string
 	schemaVersion int
 	tookLock      bool
 	closeOnce     sync.Once
@@ -235,6 +236,7 @@ func (s *Store) loadKeys(ctx context.Context, kp KeyProvider) error {
 		return err
 	}
 	s.dataKey = dataKey
+	s.keyProvider = provider
 	return nil
 }
 
@@ -243,6 +245,57 @@ func newWorkspaceID() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// Info is what ReadInfo finds in state.db without its key.
+type Info struct {
+	WorkspaceID string
+	// KeyProvider is the ID of the provider that protects the data key, or
+	// empty when state.db has no key yet.
+	KeyProvider string
+}
+
+// ReadInfo reads the workspace ID and the key provider's ID from state.db,
+// without the key and the lock, and changes nothing, so the menu and the
+// choice of key provider can run while another command uses the workspace. A
+// missing or uninitialized state.db gives a zero Info.
+func ReadInfo(ctx context.Context, ws *Workspace) (Info, error) {
+	path := ws.StatePath()
+	if strings.ContainsRune(path, '?') {
+		return Info{}, fmt.Errorf("the workspace path must not contain '?': %s", path)
+	}
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return Info{}, nil
+	} else if err != nil {
+		return Info{}, err
+	}
+	db, err := sql.Open("sqlite", path+"?_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return Info{}, err
+	}
+	defer func() { _ = db.Close() }()
+	var tables int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('meta', 'data_keys')`).Scan(&tables); err != nil {
+		return Info{}, fmt.Errorf("reading state.db: %w", err)
+	}
+	var info Info
+	if tables < 2 {
+		return info, nil
+	}
+	err = db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'workspace_id'`).Scan(&info.WorkspaceID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Info{}, fmt.Errorf("reading state.db: %w", err)
+	}
+	err = db.QueryRowContext(ctx, `SELECT provider FROM data_keys WHERE id = 1`).Scan(&info.KeyProvider)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Info{}, fmt.Errorf("reading state.db: %w", err)
+	}
+	return info, nil
+}
+
+// KeyProviderID is the ID of the provider that protects this workspace's
+// data key.
+func (s *Store) KeyProviderID() string { return s.keyProvider }
 
 // DB returns the database handle.
 func (s *Store) DB() *sql.DB { return s.db }

@@ -31,9 +31,13 @@ func NewKeychainKeyProvider(kc Keychain) *KeychainKeyProvider {
 	return &KeychainKeyProvider{kc: kc}
 }
 
+// KeychainProviderID is the ID state.db records for a workspace whose key is
+// in the OS keychain.
+const KeychainProviderID = "keychain"
+
 // ID names the provider in state.db, so a workspace is never opened with a
 // different provider than the one that wrapped its key.
-func (p *KeychainKeyProvider) ID() string { return "keychain" }
+func (p *KeychainKeyProvider) ID() string { return KeychainProviderID }
 
 // WorkspaceKeyAccount is the keychain account that holds a workspace's
 // key-encryption key.

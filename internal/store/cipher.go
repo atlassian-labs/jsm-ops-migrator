@@ -12,10 +12,10 @@ import (
 	"fmt"
 )
 
-// KeyProvider protects state.db's data key. The keychain provider lives in
-// internal/credentials; Login and pre-flight adds a passphrase provider for
-// machines without a keychain. The wrapped value is opaque to the store, so a
-// provider can keep its own parameters (a salt, for example) inside it.
+// KeyProvider protects state.db's data key. Both providers live in
+// internal/credentials: the keychain one, and the passphrase one for machines
+// without a keychain. The wrapped value is opaque to the store, so a provider
+// can keep its own parameters (a salt, for example) inside it.
 type KeyProvider interface {
 	// ID names the provider; it is saved with the wrapped key, and a
 	// workspace never opens with a different provider.
