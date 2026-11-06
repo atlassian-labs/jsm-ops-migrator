@@ -8,3 +8,6 @@ func FastPassphraseKDF() (restore func()) {
 	argonTime, argonMemory, argonThreads = 1, 64, 1
 	return func() { argonTime, argonMemory, argonThreads = t, m, p }
 }
+
+// MaxInput is how much ParseInput reads.
+const MaxInput = maxInput

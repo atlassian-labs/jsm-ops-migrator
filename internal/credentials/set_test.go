@@ -78,11 +78,31 @@ func TestParseInputErrorsNeverShowTheValue(t *testing.T) {
 		"canary-token-value\n": "line 1: want NAME=value",
 		"JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=a\nJSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=canary-token-value\n": "line 2: JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY is given twice",
 		"JSM_OPS_MIGRATOR_TOKEN=canary-token-value\n":                                                   `line 1: unknown name "JSM_OPS_MIGRATOR_TOKEN"`,
+		// A bare Atlassian API token contains '=', so what comes before it
+		// must not be shown as the name.
+		"ATATT3xFfGF0canary0123456789abcdef=1A2B3C4D\n": "line 1: want NAME=value, with NAME one of",
+		"export canary-token-value=x\n":                 "line 1: want NAME=value, with NAME one of",
+		"jsm_ops_migrator_canary=x\n":                   "line 1: want NAME=value, with NAME one of",
 	} {
 		_, err := credentials.ParseInput(strings.NewReader(input))
 		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "canary") {
 			t.Errorf("%q: err = %v, want %q without the value", input, err, want)
 		}
+	}
+}
+
+// An input cut off at the limit could drop a line or end a value early, so it
+// is refused, and one that fits exactly is read whole.
+func TestParseInputRefusesAnInputOverTheLimit(t *testing.T) {
+	line := "JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-key\n"
+	fits := line + strings.Repeat("#", credentials.MaxInput-len(line))
+	s, err := credentials.ParseInput(strings.NewReader(fits))
+	if err != nil || s.PagerDutyKey.Reveal() != "pd-key" {
+		t.Fatalf("input at the limit: %v, %v", s, err)
+	}
+	_, err = credentials.ParseInput(strings.NewReader(fits + "#"))
+	if err == nil || !strings.Contains(err.Error(), "larger than 64 KiB") {
+		t.Errorf("input over the limit: err = %v", err)
 	}
 }
 

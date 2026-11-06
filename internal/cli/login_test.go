@@ -309,6 +309,52 @@ func TestAnUncheckedSavedSiteIsNotUsed(t *testing.T) {
 }
 
 // A missing credential exits 4, and the ones given are still stored.
+// The email and API token are checked together, so one given without the
+// other was never sent to the site and is not stored.
+func TestLoginDoesNotStoreHalfOfTheAtlassianLogin(t *testing.T) {
+	for _, given := range []credentials.Kind{credentials.AtlassianToken, credentials.AtlassianEmail} {
+		t.Run(string(given), func(t *testing.T) {
+			s := newLoginSetup(t)
+			// The site would reject the token, but it is never asked.
+			s.apis.AtlassianToken = "another"
+			setCredentialsInEnv(t, credentials.Set{}, credentials.PagerDutyKey, credentials.OrgAPIKey, given)
+			r := s.run("login", "--site", "acme", "--org-id", "org-1")
+			if r.code != ExitAwaitingInput {
+				t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
+			}
+			got := s.stored()
+			if got.Has(given) {
+				t.Errorf("stored the %s without the other half", given.Label())
+			}
+			if !got.Has(credentials.PagerDutyKey) || !got.Has(credentials.OrgAPIKey) {
+				t.Errorf("stored %v missing; want the checked keys stored", got.Missing())
+			}
+			if want := "Not stored, because the check could not run yet: " + given.Label() + "."; !strings.Contains(r.stdout, want) {
+				t.Errorf("stdout %s, want %q", r.stdout, want)
+			}
+			noLeaks(t, s.dir, r)
+		})
+	}
+}
+
+// An org API key that manages several organizations works even before one is
+// chosen, so it is stored while login waits for the organization.
+func TestLoginStoresAWorkingOrgKeyWithoutAnOrganization(t *testing.T) {
+	s := newLoginSetup(t)
+	s.apis.Orgs = []preflight.Org{{ID: "org-1", Name: "Acme"}, {ID: "org-2", Name: "Other"}}
+	setCredentialsInEnv(t, credentials.Set{}, credentials.Kinds...)
+	r := s.run("login", "--site", "acme")
+	if r.code != ExitAwaitingInput || !strings.Contains(r.stderr, "Org API key") {
+		t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
+	}
+	if !s.stored().Has(credentials.OrgAPIKey) {
+		t.Error("the working org API key was not stored")
+	}
+	if c := s.config(); c.OrgID != "" {
+		t.Errorf("saved organization %q, want none", c.OrgID)
+	}
+}
+
 func TestLoginWithAMissingCredentialWaitsForInput(t *testing.T) {
 	s := newLoginSetup(t)
 	setCredentialsInEnv(t, credentials.Set{}, credentials.PagerDutyKey)
@@ -461,6 +507,28 @@ func TestPlanRunsThePreflightChecks(t *testing.T) {
 		t.Errorf("exit %d, stderr %q", r.code, r.stderr)
 	}
 	noLeaks(t, s.dir, r)
+}
+
+// The saved cloudId belongs to the saved site. Another site given with --site
+// is checked on its own, unless --cloud-id gives the cloudId to expect.
+func TestPlanOnAnotherSiteDoesNotUseTheSavedCloudID(t *testing.T) {
+	s := newLoginSetup(t)
+	s.apis.Sites["other.atlassian.net"] = preflight.Tenant{CloudID: "cloud-9", ServerTime: loginNow}
+	setCredentialsInEnv(t, credentials.Set{}, credentials.Kinds...)
+	if r := s.run("login", "--site", "acme", "--org-id", "org-1"); r.code != ExitOK {
+		t.Fatalf("login: exit %d, stderr %q", r.code, r.stderr)
+	}
+	r := s.run("plan", "--jsm-plan", "premium", "--site", "other")
+	if strings.Contains(r.stderr, "check failed") || !strings.Contains(r.stdout, "other.atlassian.net, cloudId cloud-9") {
+		t.Errorf("exit %d, stderr %q\n%s", r.code, r.stderr, r.stdout)
+	}
+	r = s.run("plan", "--jsm-plan", "premium", "--site", "other", "--cloud-id", "cloud-old")
+	if !strings.Contains(r.stderr, "plan: 1 check failed: Site") {
+		t.Errorf("--cloud-id: exit %d, stderr %q", r.code, r.stderr)
+	}
+	if c := s.config(); c.Site != "acme.atlassian.net" || c.CloudID != "cloud-1" {
+		t.Errorf("config %+v, want the saved site kept", c)
+	}
 }
 
 func TestPlanAsksForTheJSMPlanOnceAndSavesIt(t *testing.T) {

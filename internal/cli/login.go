@@ -89,15 +89,22 @@ func runLogin(ctx context.Context, env *Env, f LoginFlags) error {
 		return err
 	}
 
+	// Only a credential whose check passed is stored. A missing one counts as
+	// not checked: a token given without its email, or the email without the
+	// token, was never sent, so the site may still reject it. The one missing
+	// result that comes after a credential worked is an org API key that can
+	// manage organizations when none is set yet.
 	var keep, rejected, unchecked []credentials.Kind
 	for _, k := range credentials.Kinds {
-		switch checkStatus(report, k) {
-		case preflight.Failed:
-			rejected = append(rejected, k)
-		case preflight.NotChecked:
-			unchecked = append(unchecked, k)
-		default:
+		switch status := checkStatus(report, k); {
+		case status == preflight.OK, status == preflight.Warning:
 			keep = append(keep, k)
+		case status == preflight.Missing && k == credentials.OrgAPIKey && len(report.Orgs) > 0:
+			keep = append(keep, k)
+		case status == preflight.Failed:
+			rejected = append(rejected, k)
+		default:
+			unchecked = append(unchecked, k)
 		}
 	}
 	save := creds.Only(keep...).Merge(stored.Only(rejected...)).Merge(stored.Only(unchecked...))

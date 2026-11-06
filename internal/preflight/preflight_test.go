@@ -132,6 +132,8 @@ func TestEachCheckResult(t *testing.T) {
 			preflight.OrgKey, preflight.Failed, "rejected"},
 		{"no organization set", func(_ *testkit.FakeAPIs, in *preflight.Input) { in.OrgID = "" },
 			preflight.OrgKey, preflight.Missing, "no organization is set"},
+		{"org key forbidden", func(f *testkit.FakeAPIs, _ *preflight.Input) { f.OrgsErr = httperr.ErrForbidden },
+			preflight.OrgKey, preflight.Failed, "does not allow this key"},
 		{"organization the key cannot manage", func(_ *testkit.FakeAPIs, in *preflight.Input) { in.OrgID = "org-2" },
 			preflight.OrgKey, preflight.Failed, "cannot manage organization org-2"},
 
@@ -144,6 +146,8 @@ func TestEachCheckResult(t *testing.T) {
 			preflight.OrgAdmin, preflight.NotChecked, "dial tcp"},
 		{"admin check without an organization", func(_ *testkit.FakeAPIs, in *preflight.Input) { in.OrgID = "" },
 			preflight.OrgAdmin, preflight.NotChecked, "needs the organization"},
+		{"admin check after the org key was rejected", func(f *testkit.FakeAPIs, _ *preflight.Input) { f.OrgAPIKey = "another" },
+			preflight.OrgAdmin, preflight.NotChecked, "needs a working org API key"},
 		{"admin check without the org key", func(_ *testkit.FakeAPIs, in *preflight.Input) {
 			in.Credentials = in.Credentials.With(credentials.OrgAPIKey, "")
 		}, preflight.OrgAdmin, preflight.NotChecked, "needs the org API key"},
@@ -176,6 +180,10 @@ func TestEachCheckResult(t *testing.T) {
 			preflight.GlobalEscalations, preflight.NotChecked, "dial tcp"},
 		{"API check without a cloudId", func(f *testkit.FakeAPIs, in *preflight.Input) { f.TenantErr = unavailable; in.CloudID = "" },
 			preflight.Services, preflight.NotChecked, "needs the site's cloudId"},
+		{"API check after the token was rejected", func(f *testkit.FakeAPIs, _ *preflight.Input) { f.AtlassianToken = "another" },
+			preflight.Services, preflight.NotChecked, "needs a working Atlassian email and API token"},
+		{"API check when the token could not be checked", func(f *testkit.FakeAPIs, _ *preflight.Input) { f.AccessErr = unavailable },
+			preflight.GlobalEscalations, preflight.NotChecked, "needs a working Atlassian email and API token"},
 		{"API check without Atlassian credentials", func(_ *testkit.FakeAPIs, in *preflight.Input) {
 			in.Credentials = in.Credentials.With(credentials.AtlassianToken, "")
 		}, preflight.UserNotifications, preflight.NotChecked, "needs the Atlassian email and API token"},
@@ -212,6 +220,39 @@ func TestAMissingCredentialStillChecksTheOtherSide(t *testing.T) {
 	}
 	if slices.Contains(f.Calls(), "pagerduty abilities") {
 		t.Error("called PagerDuty without a key")
+	}
+}
+
+// Every call with a credential the API already rejected counts as another
+// failed login, so a rejected token or org key is sent once, by its own check.
+func TestARejectedCredentialIsSentOnce(t *testing.T) {
+	cases := []struct {
+		name   string
+		reject func(*testkit.FakeAPIs)
+		check  string // the call of the credential's own check
+		never  string // the calls of the checks that depend on it
+	}{
+		{"atlassian token", func(f *testkit.FakeAPIs) { f.AtlassianToken = "another" }, "ops teams ", "api "},
+		{"org API key", func(f *testkit.FakeAPIs) { f.OrgAPIKey = "another" }, "admin orgs", "admin find user"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := testkit.HealthyAPIs(now)
+			tc.reject(f)
+			runChecks(t, f, healthyInput())
+			n := 0
+			for _, call := range f.Calls() {
+				switch {
+				case strings.HasPrefix(call, tc.check):
+					n++
+				case strings.HasPrefix(call, tc.never):
+					t.Errorf("sent the rejected credential again: %s", call)
+				}
+			}
+			if n != 1 {
+				t.Errorf("%d calls starting %q, want 1: %v", n, tc.check, f.Calls())
+			}
+		})
 	}
 }
 

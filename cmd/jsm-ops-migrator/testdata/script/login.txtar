@@ -12,7 +12,8 @@ env JSM_OPS_MIGRATOR_ORG_API_KEY=org-canary-0123456789
 # is stored or saved. Login still finishes.
 exec jsm-ops-migrator login --site ACME --org-id org-1
 stdout 'PagerDuty API key +not checked$'
-stdout 'PagerDuty API key, Site, Org API key and Org admin: the API clients are not built yet.'
+stdout 'PagerDuty API key, Site and Org API key: the API clients are not built yet.'
+stdout 'Org admin +not checked +needs a working org API key$'
 stdout 'Not stored, because the check could not run yet: PagerDuty API key, Atlassian account email, Atlassian API token and org API key.'
 stdout 'Not saved, because the check did not pass: site acme.atlassian.net, organization org-1.'
 ! stdout 'canary'

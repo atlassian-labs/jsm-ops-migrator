@@ -2,6 +2,7 @@ package credentials
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/subtle"
 	"fmt"
 	"io"
@@ -163,13 +164,22 @@ const maxInput = 64 << 10
 // lines, lines starting with '#' and an "export " prefix are ignored, and a
 // value may be quoted. Errors name the line and the name, never the value.
 func ParseInput(r io.Reader) (Set, error) {
+	// Reading one byte past the limit tells a cut-off input from one that
+	// fits, so a value is never silently truncated.
+	input, err := io.ReadAll(io.LimitReader(r, maxInput+1))
+	if err != nil {
+		return Set{}, fmt.Errorf("reading the credentials: %w", err)
+	}
+	if len(input) > maxInput {
+		return Set{}, fmt.Errorf("the input is larger than %d KiB", maxInput>>10)
+	}
 	byName := map[string]Kind{}
 	for _, k := range Kinds {
 		byName[k.EnvVar()] = k
 	}
 	var s Set
 	seen := map[Kind]bool{}
-	sc := bufio.NewScanner(io.LimitReader(r, maxInput))
+	sc := bufio.NewScanner(bytes.NewReader(input))
 	sc.Buffer(make([]byte, 0, 4096), maxInput)
 	for n := 1; sc.Scan(); n++ {
 		line := strings.TrimSpace(sc.Text())
@@ -182,8 +192,13 @@ func ParseInput(r io.Reader) (Set, error) {
 		}
 		name = strings.TrimSpace(name)
 		k, known := byName[name]
-		if !known {
+		switch {
+		case !known && isEnvName(name):
 			return Set{}, fmt.Errorf("line %d: unknown name %q: want one of %s", n, name, envVarList())
+		case !known:
+			// A bare secret can contain '=', as Atlassian API tokens do, so
+			// what comes before it is never shown unless it looks like a name.
+			return Set{}, fmt.Errorf("line %d: want NAME=value, with NAME one of %s", n, envVarList())
 		}
 		if seen[k] {
 			return Set{}, fmt.Errorf("line %d: %s is given twice", n, name)
@@ -195,6 +210,19 @@ func ParseInput(r io.Reader) (Set, error) {
 		return Set{}, fmt.Errorf("reading the credentials: %w", err)
 	}
 	return s, nil
+}
+
+// isEnvName reports whether s looks like an environment variable name:
+// uppercase letters, digits and underscores, starting with a letter.
+func isEnvName(s string) bool {
+	for i, c := range s {
+		switch {
+		case c >= 'A' && c <= 'Z', c == '_' && i > 0, c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 func unquote(v string) string {

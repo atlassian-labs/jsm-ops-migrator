@@ -24,9 +24,10 @@ type FakeAPIs struct {
 	TenantErr error
 	AccessErr error
 	// APIs lists the new public APIs the site has.
-	APIs   map[preflight.API]bool
-	APIErr error
-	Orgs   []preflight.Org
+	APIs    map[preflight.API]bool
+	APIErr  error
+	Orgs    []preflight.Org
+	OrgsErr error
 	// Members maps an organization to the emails of its accounts.
 	Members map[string][]string
 	FindErr error
@@ -113,6 +114,9 @@ func (c fakeClients) Orgs(context.Context) ([]preflight.Org, error) {
 	c.f.record("admin orgs")
 	if !accepted(c.f.OrgAPIKey, c.creds.OrgAPIKey.Reveal()) {
 		return nil, fmt.Errorf("GET /admin/v1/orgs: 401: %w", httperr.ErrUnauthorized)
+	}
+	if c.f.OrgsErr != nil {
+		return nil, c.f.OrgsErr
 	}
 	return c.f.Orgs, nil
 }

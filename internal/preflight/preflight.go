@@ -278,6 +278,13 @@ func (r *run) site() (Status, string) {
 	return OK, fmt.Sprintf("%s, cloudId %s", r.in.Site, t.CloudID)
 }
 
+// passed reports whether check id passed, or did not run in this report. A
+// check that depends on the same credential runs only after it worked.
+func (r *run) passed(id ID) bool {
+	c, ok := r.report.Find(id)
+	return !ok || c.Status == OK
+}
+
 // cloudID is the one the site gave, or else the saved one.
 func (r *run) cloudID() string {
 	if r.report.CloudID != "" {
@@ -314,6 +321,8 @@ func (r *run) orgKey() (Status, string) {
 	switch {
 	case errors.Is(err, httperr.ErrUnauthorized):
 		return Failed, "the Admin API rejected the key"
+	case errors.Is(err, httperr.ErrForbidden):
+		return Failed, "the Admin API does not allow this key to list its organizations"
 	case err != nil:
 		return notChecked(err)
 	}
@@ -333,6 +342,9 @@ func (r *run) orgAdmin() (Status, string) {
 		return NotChecked, "needs the org API key and the Atlassian account email"
 	case r.in.OrgID == "":
 		return NotChecked, "needs the organization"
+	case !r.passed(OrgKey):
+		// Each call with a rejected key is another failed login on the account.
+		return NotChecked, "needs a working org API key"
 	}
 	acct, err := r.c.Admin.FindUser(r.ctx, r.in.OrgID, r.in.Credentials.AtlassianEmail)
 	switch {
@@ -391,6 +403,10 @@ func (r *run) api(api API) (Status, string) {
 		return NotChecked, "needs the Atlassian email and API token"
 	case r.cloudID() == "":
 		return NotChecked, "needs the site's cloudId"
+	case !r.passed(AtlassianToken):
+		// Repeated failed logins can lock the account behind a CAPTCHA, so a
+		// token the site did not accept is not sent again.
+		return NotChecked, "needs a working Atlassian email and API token"
 	}
 	ok, err := r.c.Atlassian.HasAPI(r.ctx, r.cloudID(), api)
 	switch {

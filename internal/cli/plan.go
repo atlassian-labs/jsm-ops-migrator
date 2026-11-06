@@ -43,6 +43,10 @@ func runPlan(ctx context.Context, env *Env, f PlanFlags) error {
 	if err != nil {
 		return fmt.Errorf("site %q: %w", env.Config.Site, err)
 	}
+	cloudID, err := cloudIDFor(env, site)
+	if err != nil {
+		return err
+	}
 
 	clients, err := env.Clients(creds)
 	if err != nil {
@@ -53,7 +57,7 @@ func runPlan(ctx context.Context, env *Env, f PlanFlags) error {
 		Sources:       sources,
 		SecretStorage: vault.Where(),
 		Site:          site,
-		CloudID:       env.Config.CloudID,
+		CloudID:       cloudID,
 		OrgID:         env.Config.OrgID,
 		JSMPlan:       jsmPlan,
 		Checks:        checks,
@@ -72,6 +76,24 @@ func runPlan(ctx context.Context, env *Env, f PlanFlags) error {
 	}
 	env.summarize(append(summary, "Reading PagerDuty and JSM is not implemented yet"))
 	return fmt.Errorf("plan: reading PagerDuty and JSM is %w", ErrNotImplemented)
+}
+
+// cloudIDFor is the cloudId the site's answer is compared with: one given for
+// this run with --cloud-id or the environment, or else the saved one, but only
+// for the saved site. The saved cloudId belongs to that site, so checking
+// another site against it would report a move that never happened.
+func cloudIDFor(env *Env, site string) (string, error) {
+	saved, err := LoadConfigFile(env.Workspace)
+	if err != nil {
+		return "", err
+	}
+	if env.Config.CloudID != saved.CloudID {
+		return env.Config.CloudID, nil
+	}
+	if savedSite, err := normalizeSite(saved.Site); err == nil && savedSite == site {
+		return saved.CloudID, nil
+	}
+	return "", nil
 }
 
 // statedJSMPlan is the plan from --jsm-plan, the environment or config.yaml.
