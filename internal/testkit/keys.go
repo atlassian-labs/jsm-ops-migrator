@@ -5,7 +5,10 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"io/fs"
+	"os"
 	"sync"
 	"testing"
 
@@ -127,4 +130,62 @@ func NewStore(t testing.TB) *store.Store {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+// FileKeychain is a credentials.Keychain kept in a JSON file. Tests that run
+// the binary as separate processes use it, since a FakeKeychain lives in one
+// process and the real keychain must never be touched by a test.
+type FileKeychain struct{ path string }
+
+// NewFileKeychain returns a keychain stored at path, which need not exist yet.
+func NewFileKeychain(path string) *FileKeychain { return &FileKeychain{path: path} }
+
+func (k *FileKeychain) load() (map[string]string, error) {
+	items := map[string]string{}
+	data, err := os.ReadFile(k.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return items, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return items, json.Unmarshal(data, &items)
+}
+
+func (k *FileKeychain) save(items map[string]string) error {
+	data, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(k.path, data, 0o600)
+}
+
+func (k *FileKeychain) Get(service, account string) (credentials.Secret, error) {
+	items, err := k.load()
+	if err != nil {
+		return credentials.Secret{}, err
+	}
+	v, ok := items[service+"/"+account]
+	if !ok {
+		return credentials.Secret{}, credentials.ErrKeychainItemNotFound
+	}
+	return credentials.NewSecret(v), nil
+}
+
+func (k *FileKeychain) Set(service, account string, value credentials.Secret) error {
+	items, err := k.load()
+	if err != nil {
+		return err
+	}
+	items[service+"/"+account] = value.Reveal()
+	return k.save(items)
+}
+
+func (k *FileKeychain) Delete(service, account string) error {
+	items, err := k.load()
+	if err != nil {
+		return err
+	}
+	delete(items, service+"/"+account)
+	return k.save(items)
 }
