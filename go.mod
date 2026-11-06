@@ -1,6 +1,6 @@
 module github.com/atlassian-labs/jsm-ops-migrator
 
-go 1.26.10
+go 1.27.3
 
 require (
 	charm.land/bubbles/v2 v2.2.1
