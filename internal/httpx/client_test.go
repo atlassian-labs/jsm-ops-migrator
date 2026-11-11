@@ -499,9 +499,11 @@ func TestErrorsNeverQuoteTheAnswer(t *testing.T) {
 	}
 	for name, body := range cases {
 		client, _, _ := serve(t, httpx.Config{}, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) })
-		var v schedule
-		_, err := client.DoJSON(context.Background(), httpx.Request{Family: httpx.PagerDuty, Path: "/schedules"}, &v)
-		check(name, err)
+		for _, family := range []httpx.Family{httpx.PagerDuty, httpx.JSMOps} {
+			var v schedule
+			_, err := client.DoJSON(context.Background(), httpx.Request{Family: family, Path: "/schedules"}, &v)
+			check(name+" from "+string(family), err)
+		}
 	}
 
 	// Pages decodes the list items itself.

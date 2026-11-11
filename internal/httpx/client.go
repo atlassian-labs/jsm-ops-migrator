@@ -190,7 +190,14 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 		kind, retry := judge(ctx, req, res)
 		c.log(ctx, req, n, res, c.now().Sub(start))
 		if kind == nil {
-			return &Response{Status: res.status, Body: res.body, RequestID: requestID(res.header), header: res.header, req: req}, nil
+			body := res.body
+			if req.Family == PagerDuty {
+				var derr error
+				if body, derr = c.dropCalendarURLs(body); derr != nil {
+					return nil, c.fail(req, httperr.ErrBadResponse, result{status: res.status, header: res.header, err: derr})
+				}
+			}
+			return &Response{Status: res.status, Body: body, RequestID: requestID(res.header), header: res.header, req: req}, nil
 		}
 		if !retry || n >= c.cfg.Retry.MaxAttempts {
 			return nil, c.fail(req, kind, res)

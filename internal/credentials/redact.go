@@ -66,6 +66,13 @@ func NewRedactor(known ...Secret) *Redactor {
 // RedactText applies the pattern rules to a string.
 func RedactText(s string) string { return (*Redactor)(nil).String(s) }
 
+// HasCalendarURL reports whether s holds a PagerDuty calendar feed URL.
+func HasCalendarURL(s string) bool { return calendarURLRe.MatchString(s) }
+
+// RedactCalendarURLs replaces every PagerDuty calendar feed URL in s with
+// Redacted and leaves the rest of s as it is.
+func RedactCalendarURLs(s string) string { return calendarURLRe.ReplaceAllString(s, Redacted) }
+
 // RedactJSON applies the pattern rules to a JSON document.
 func RedactJSON(b []byte) []byte { return (*Redactor)(nil).JSON(b) }
 

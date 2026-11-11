@@ -1,0 +1,35 @@
+# login finds where the PagerDuty account is hosted and saves it with the key;
+# a region given for the run is used as it is.
+env HOME=$WORK/home
+env USERPROFILE=$WORK/home
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+env JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=operator@example.com
+env JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN=atl-canary-0123456789
+env JSM_OPS_MIGRATOR_ORG_API_KEY=org-canary-0123456789
+env JSM_OPS_MIGRATOR_TEST_APIS=healthy
+env JSM_OPS_MIGRATOR_TEST_PAGERDUTY_REGION=eu
+
+# A region given for the run is not switched, so the US host rejects the key
+# of an EU account, and nothing is saved for PagerDuty.
+! exec jsm-ops-migrator login --site acme --org-id org-1 --pagerduty-region us
+stdout 'PagerDuty API key +failed +PagerDuty rejected the key'
+! grep 'pagerduty_region' $WORK/home/jsm-ops-migrator/config.yaml
+! grep 'pd-canary' $WORK/keychain.json
+
+# Without one, login tries the other region after the rejection.
+exec jsm-ops-migrator login --site acme --org-id org-1
+stdout 'PagerDuty API key +ok'
+stdout 'Saved in .*config.yaml: .*PagerDuty region eu\.'
+grep 'pagerduty_region: eu' $WORK/home/jsm-ops-migrator/config.yaml
+grep 'pd-canary-0123456789' $WORK/keychain.json
+! stdout 'canary'
+! stderr .
+
+# plan reads from the saved region.
+! exec jsm-ops-migrator plan --only pagerduty
+stdout 'PagerDuty API key +ok'
+! stderr 'pdfake'
+
+# An unknown region is refused before anything is sent.
+! exec jsm-ops-migrator plan --only pagerduty --pagerduty-region apac
+stderr 'pagerduty_region "apac": want us or eu'

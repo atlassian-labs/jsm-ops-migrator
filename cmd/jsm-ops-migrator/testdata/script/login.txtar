@@ -29,6 +29,7 @@ stdout 'PagerDuty API key .*ok'
 stdout 'Stored in the OS keychain: PagerDuty API key, Atlassian account email, Atlassian API token and org API key.'
 stdout 'Saved in .*config.yaml: site acme.atlassian.net, cloudId cloud-1, organization org-1.'
 grep 'site: acme.atlassian.net' $WORK/home/jsm-ops-migrator/config.yaml
+grep 'pagerduty_region: us' $WORK/home/jsm-ops-migrator/config.yaml
 ! grep 'canary' $WORK/home/jsm-ops-migrator/config.yaml
 ! stdout 'canary'
 ! stdout 'operator@example.com'

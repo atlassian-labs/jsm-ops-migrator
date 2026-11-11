@@ -53,6 +53,10 @@ type Env struct {
 	// Now is the clock.
 	Now func() time.Time
 
+	// given are the settings set for this run with a flag or an environment
+	// variable.
+	given map[string]bool
+
 	keychain       credentials.Keychain
 	newKeyProvider func(context.Context, *Env) (store.KeyProvider, error)
 	newClients     func(*Env, credentials.Set) (preflight.Clients, error)

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
@@ -73,9 +74,17 @@ func runLogin(ctx context.Context, env *Env, f LoginFlags) error {
 		return fmt.Errorf("--site: %w", err)
 	}
 
+	if env.Config.PagerDutyRegion, err = pagerDutyRegion(env.Config.PagerDutyRegion); err != nil {
+		return err
+	}
 	clients, err := env.Clients(creds)
 	if err != nil {
 		return err
+	}
+	if creds.Has(credentials.PagerDutyKey) {
+		if clients, err = findPagerDutyRegion(ctx, env, creds, clients); err != nil {
+			return err
+		}
 	}
 	if orgID == "" {
 		if orgID, err = chooseOrg(ctx, env, interactive, clients, creds); err != nil {
@@ -140,6 +149,10 @@ func runLogin(ctx context.Context, env *Env, f LoginFlags) error {
 			}
 		}
 	}
+	// The region is saved with the key, so only when the key's check passed.
+	if c, _ := report.Find(preflight.PagerDutyKey); c.Status == preflight.OK || c.Status == preflight.Warning {
+		cfg.PagerDutyRegion = env.Config.PagerDutyRegion
+	}
 	if cfg != fileCfg {
 		if err := SaveConfig(env.Workspace, cfg); err != nil {
 			return err
@@ -147,17 +160,18 @@ func runLogin(ctx context.Context, env *Env, f LoginFlags) error {
 	}
 
 	res := loginResult{
-		Checks:    report.Checks,
-		Stored:    kindsIn(save),
-		StoredIn:  vault.Where(),
-		Rejected:  kindsIn(fresh.Only(rejected...)),
-		Unchecked: kindsIn(fresh.Only(unchecked...)),
-		Config:    savedConfig{Site: cfg.Site, CloudID: cfg.CloudID, OrgID: cfg.OrgID},
-		NotSaved:  notSaved,
-		storedNow: kindsIn(fresh.Only(keep...)),
-		savedSite: cfg.Site != "" && (cfg.Site != fileCfg.Site || cfg.CloudID != fileCfg.CloudID),
-		savedOrg:  cfg.OrgID != "" && cfg.OrgID != fileCfg.OrgID,
-		removed:   removed,
+		Checks:      report.Checks,
+		Stored:      kindsIn(save),
+		StoredIn:    vault.Where(),
+		Rejected:    kindsIn(fresh.Only(rejected...)),
+		Unchecked:   kindsIn(fresh.Only(unchecked...)),
+		Config:      savedConfig{Site: cfg.Site, CloudID: cfg.CloudID, OrgID: cfg.OrgID, PagerDutyRegion: cfg.PagerDutyRegion},
+		NotSaved:    notSaved,
+		storedNow:   kindsIn(fresh.Only(keep...)),
+		savedSite:   cfg.Site != "" && (cfg.Site != fileCfg.Site || cfg.CloudID != fileCfg.CloudID),
+		savedOrg:    cfg.OrgID != "" && cfg.OrgID != fileCfg.OrgID,
+		savedRegion: cfg.PagerDutyRegion != fileCfg.PagerDutyRegion,
+		removed:     removed,
 	}
 	if err := writeLoginResult(env, res); err != nil {
 		return err
@@ -165,6 +179,44 @@ func runLogin(ctx context.Context, env *Env, f LoginFlags) error {
 	env.summarize(loginSummary(res))
 	return checksError("login", report)
 }
+
+// findPagerDutyRegion checks the PagerDuty key in the configured region and,
+// unless the region was given for this run, in the other one after a 401: a
+// key works only in the region its account is hosted in, and most operators
+// do not know which that is. The key goes to the second host only after the
+// first rejected it, and both are PagerDuty's. The key counts as rejected
+// only when both regions reject it; any other answer from the second region
+// is the one reported, so an outage there shows as a check that could not
+// run, not as a key to fix. env.Config then names the region the answer came
+// from, and the answer is kept, so the pre-flight check reports it without
+// calling again.
+func findPagerDutyRegion(ctx context.Context, env *Env, creds credentials.Set, clients preflight.Clients) (preflight.Clients, error) {
+	abilities, err := clients.PagerDuty.Abilities(ctx)
+	if errors.Is(err, httperr.ErrUnauthorized) && !env.given["pagerduty_region"] {
+		tried := env.Config.PagerDutyRegion
+		env.Config.PagerDutyRegion = otherRegion(tried)
+		other, cerr := env.Clients(creds)
+		if cerr != nil {
+			return preflight.Clients{}, cerr
+		}
+		if a, e := other.PagerDuty.Abilities(ctx); !errors.Is(e, httperr.ErrUnauthorized) {
+			clients, abilities, err = other, a, e
+		} else {
+			env.Config.PagerDutyRegion = tried
+		}
+	}
+	clients.PagerDuty = answeredAbilities{abilities: abilities, err: err}
+	return clients, nil
+}
+
+// answeredAbilities is a PagerDuty client whose /abilities answer is already
+// known.
+type answeredAbilities struct {
+	abilities []string
+	err       error
+}
+
+func (a answeredAbilities) Abilities(context.Context) ([]string, error) { return a.abilities, a.err }
 
 // checkStatus is the status of the check that proves credential k. A
 // credential no check proves counts as not checked, so it is never stored.

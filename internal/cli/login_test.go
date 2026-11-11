@@ -15,10 +15,13 @@ import (
 	"time"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/pd"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit/pdfake"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
 )
 
@@ -37,6 +40,9 @@ type loginSetup struct {
 	asked    []string   // the headings and titles shown
 	asks     [][]tui.Question
 	stdin    string
+	// pd, when set, is the PagerDuty account, read with the real client in
+	// the region the command chose; otherwise apis answers for PagerDuty too.
+	pd *pdfake.Fake
 }
 
 func newLoginSetup(t *testing.T) *loginSetup {
@@ -75,7 +81,7 @@ func (s *loginSetup) run(args ...string) result {
 	var out, errOut bytes.Buffer
 	opts := Options{
 		Keychain:   s.kc,
-		NewClients: func(_ *Env, c credentials.Set) (preflight.Clients, error) { return s.apis.ClientsFor(c), nil },
+		NewClients: s.clients,
 		Now:        func() time.Time { return loginNow },
 	}
 	h := hooks{
@@ -87,6 +93,20 @@ func (s *loginSetup) run(args ...string) result {
 	}
 	code := executeWith(context.Background(), args, strings.NewReader(s.stdin), &out, &errOut, opts, defaultBodies(), h)
 	return result{code, out.String(), errOut.String()}
+}
+
+func (s *loginSetup) clients(env *Env, c credentials.Set) (preflight.Clients, error) {
+	clients := s.apis.ClientsFor(c)
+	if s.pd != nil {
+		cfg := s.pd.Config(httpx.Region(env.Config.PagerDutyRegion))
+		cfg.Credentials = c
+		h, err := httpx.New(cfg)
+		if err != nil {
+			return preflight.Clients{}, err
+		}
+		clients.PagerDuty = pd.New(h)
+	}
+	return clients, nil
 }
 
 // stored reads what the workspace's vault holds.

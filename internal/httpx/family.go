@@ -17,7 +17,8 @@ type Family string
 
 const (
 	// PagerDuty is the PagerDuty REST API, v2 and v3, called with the
-	// PagerDuty API key. Only GET is ever sent.
+	// PagerDuty API key. Only GET is ever sent, and its answers come back
+	// without calendar feed URLs.
 	PagerDuty Family = "pagerduty"
 	// JSMOps is the JSM Operations REST API on the Atlassian API host (paths
 	// start with /jsm/ops/api/<cloudId>), called with the Atlassian account
