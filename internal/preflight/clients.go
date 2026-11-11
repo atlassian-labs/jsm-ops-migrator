@@ -9,8 +9,8 @@ import (
 )
 
 // Clients are the calls the checks make. cmd/jsm-ops-migrator builds them from the
-// credentials being checked. Each API client implements its part, and until it
-// exists cmd/jsm-ops-migrator passes Placeholders.
+// credentials being checked: pd implements PagerDuty, and jsm implements
+// Atlassian and Admin. Placeholders stand in where no clients are configured.
 //
 // Errors wrap the httperr declarations: ErrUnauthorized when the credential
 // is rejected, ErrForbidden when it may not make the call, ErrNotFound when
@@ -87,9 +87,10 @@ const (
 )
 
 // Placeholders returns clients whose every call fails with
-// httperr.ErrUnavailable, for builds made before the PagerDuty and JSM
-// clients exist. Every check that needs one reports that it could not run,
-// all for the same reason, so the output can say it once.
+// httperr.ErrUnavailable, for where no API clients are configured, such as
+// the binary's tests that reach no API. Every check that needs one reports
+// that it could not run, all for the same reason, so the output can say it
+// once.
 func Placeholders() Clients {
 	return Clients{PagerDuty: placeholder{}, Atlassian: placeholder{}, Admin: placeholder{}}
 }

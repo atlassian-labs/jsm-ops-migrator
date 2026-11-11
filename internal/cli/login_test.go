@@ -43,6 +43,8 @@ type loginSetup struct {
 	// pd, when set, is the PagerDuty account, read with the real client in
 	// the region the command chose; otherwise apis answers for PagerDuty too.
 	pd *pdfake.Fake
+	// sites holds the site each built set of clients was for.
+	sites []string
 }
 
 func newLoginSetup(t *testing.T) *loginSetup {
@@ -96,6 +98,7 @@ func (s *loginSetup) run(args ...string) result {
 }
 
 func (s *loginSetup) clients(env *Env, c credentials.Set) (preflight.Clients, error) {
+	s.sites = append(s.sites, env.Config.Site)
 	clients := s.apis.ClientsFor(c)
 	if s.pd != nil {
 		cfg := s.pd.Config(httpx.Region(env.Config.PagerDutyRegion))
@@ -527,6 +530,20 @@ func TestPlanRunsThePreflightChecks(t *testing.T) {
 		t.Errorf("exit %d, stderr %q", r.code, r.stderr)
 	}
 	noLeaks(t, s.dir, r)
+}
+
+// The clients choose the Atlassian API host by the site, so they are built
+// for the site being checked, in the form the checks use, however it was
+// typed.
+func TestClientsAreBuiltForTheCheckedSite(t *testing.T) {
+	s := newLoginSetup(t)
+	s.apis.Sites["acme.jira-dev.com"] = preflight.Tenant{CloudID: "cloud-stg", ServerTime: loginNow}
+	setCredentialsInEnv(t, credentials.Set{}, credentials.Kinds...)
+	s.run("login", "--site", "https://ACME.jira-dev.com/jira", "--org-id", "org-1")
+	s.run("plan", "--jsm-plan", "premium", "--site", "acme")
+	if len(s.sites) != 2 || s.sites[0] != "acme.jira-dev.com" || s.sites[1] != "acme.atlassian.net" {
+		t.Fatalf("clients built for %q, want login's acme.jira-dev.com, then plan's acme.atlassian.net", s.sites)
+	}
 }
 
 // The saved cloudId belongs to the saved site. Another site given with --site
