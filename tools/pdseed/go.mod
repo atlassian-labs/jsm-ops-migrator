@@ -1,3 +1,3 @@
 module github.com/atlassian-labs/jsm-ops-migrator/tools/pdseed
 
-go 1.27.3
+go 1.27.4
