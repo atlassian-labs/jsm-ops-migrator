@@ -43,6 +43,8 @@ func runPlan(ctx context.Context, env *Env, f PlanFlags) error {
 	if err != nil {
 		return fmt.Errorf("site %q: %w", env.Config.Site, err)
 	}
+	// The API clients choose the Atlassian API host by the site's name.
+	env.Config.Site = site
 	cloudID, err := cloudIDFor(env, site)
 	if err != nil {
 		return err
