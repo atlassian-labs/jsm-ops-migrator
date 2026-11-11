@@ -39,20 +39,26 @@ CI also runs the tests on macOS, Windows and Linux, builds six targets without
 cgo and fuzzes every `Fuzz` function. Set `JSM_OPS_MIGRATOR_TEST_REAL_KEYCHAIN=1` to
 run the keychain test against the real OS keychain. No other test may touch
 it: the binary's tests in `cmd/jsm-ops-migrator` use a file-backed keychain from
-`testkit`, and the `internal` tests use `testkit.FakeKeychain`. A script that sets
-`JSM_OPS_MIGRATOR_TEST_APIS=healthy` runs the binary against `testkit`'s fake
-APIs instead of the placeholders.
+`testkit`, and the `internal` tests use `testkit.FakeKeychain`. The scripts reach
+no network: a script that sets `JSM_OPS_MIGRATOR_TEST_APIS=healthy` runs the
+binary against `testkit`'s fake APIs, and reads PagerDuty with the real client
+from a `testkit/pdfake` account hosted in the region that
+`JSM_OPS_MIGRATOR_TEST_PAGERDUTY_REGION` names (`us` when empty); the others
+get placeholders.
 
 Credentials come from masked prompts, `login --stdin` or these environment
 variables, never from flags: `JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY`,
 `JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL`, `JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN` and
 `JSM_OPS_MIGRATOR_ORG_API_KEY`. On a machine without a keychain,
-`JSM_OPS_MIGRATOR_PASSPHRASE` protects the workspace instead. Until the API
-clients exist, `cmd/jsm-ops-migrator` wires `preflight.Placeholders`, so every
-check that needs an API reports "not checked". `login` stores only a credential,
-and saves only a site and organization, whose check passed, so for now it
-stores and saves none. A site in `config.yaml` without its cloudId was never
-checked and counts as not saved.
+`JSM_OPS_MIGRATOR_PASSPHRASE` protects the workspace instead. The PagerDuty
+client is real: `login` checks the key and finds where the account is hosted,
+`us` or `eu`, which it saves as `pagerduty_region` with the key. Until the JSM
+client exists, `cmd/jsm-ops-migrator` wires `preflight.Placeholders` for the
+Atlassian side, so every check that needs an Atlassian API reports "not
+checked". `login` stores only a credential, and saves only a setting, whose
+check passed, so for now it stores only the PagerDuty key and saves only its
+region. A site in `config.yaml` without its cloudId was never checked and
+counts as not saved.
 
 ## Rules
 
@@ -61,7 +67,8 @@ checked and counts as not saved.
    imports, may write to PagerDuty.
 2. **Network boundary.** Only `internal/pd` and `internal/jsm/...` make network
    calls, and only through `internal/httpx`, so every call gets the same
-   retries, limits and redaction.
+   retries, limits and redaction. Code that reads PagerDuty data defines its
+   own paths and types and reads them with `pd.Client.Get` and `pd.List`.
 3. **Secrets.** Credentials are `credentials.Secret` values, which print as
    `[redacted]`. They live only in the OS keychain, environment variables or
    the encrypted credentials file, and are never taken as flag values.

@@ -29,6 +29,10 @@ type Config struct {
 	CloudID            string `mapstructure:"cloud_id" yaml:"cloud_id,omitempty"`
 	OrgID              string `mapstructure:"org_id" yaml:"org_id,omitempty"`
 	PagerDutySubdomain string `mapstructure:"pagerduty_subdomain" yaml:"pagerduty_subdomain,omitempty"`
+	// PagerDutyRegion is where the PagerDuty account is hosted, us or eu. A
+	// key works only in its account's region; login finds it and saves it
+	// with the key.
+	PagerDutyRegion string `mapstructure:"pagerduty_region" yaml:"pagerduty_region,omitempty"`
 	// JSMPlan is the site's JSM plan as the operator states it; no API
 	// reports it.
 	JSMPlan string `mapstructure:"jsm_plan" yaml:"jsm_plan,omitempty"`
@@ -42,6 +46,7 @@ var configKeys = []configKey{
 	{"cloud_id", "cloud-id", "cloudId of the site (overrides the workspace config)"},
 	{"org_id", "org-id", "Atlassian organization ID (overrides the workspace config)"},
 	{"pagerduty_subdomain", "pagerduty-subdomain", "PagerDuty subdomain (overrides the workspace config)"},
+	{"pagerduty_region", "pagerduty-region", "where the PagerDuty account is hosted: us or eu (overrides the workspace config; login finds it when not given)"},
 	{"jsm_plan", "jsm-plan", "the site's JSM plan: free, standard, premium or enterprise (overrides the workspace config)"},
 }
 
@@ -81,6 +86,47 @@ func loadConfig(ws *store.Workspace, flags *pflag.FlagSet) (Config, error) {
 		return Config{}, fmt.Errorf("%s: %w", ws.ConfigPath(), err)
 	}
 	return c, nil
+}
+
+// givenSettings are the settings this run sets with a flag or an environment
+// variable, as opposed to the saved ones. An empty variable counts as unset,
+// as it does in loadConfig.
+func givenSettings(flags *pflag.FlagSet) map[string]bool {
+	out := map[string]bool{}
+	for _, k := range configKeys {
+		if os.Getenv(envPrefix+"_"+strings.ToUpper(k.key)) != "" {
+			out[k.key] = true
+		}
+		if f := flags.Lookup(k.flag); f != nil && f.Changed {
+			out[k.key] = true
+		}
+	}
+	return out
+}
+
+// PagerDuty regions, as pagerduty_region names them.
+const (
+	regionUS = "us"
+	regionEU = "eu"
+)
+
+// pagerDutyRegion checks a pagerduty_region value and returns it in the form
+// the clients take. Empty means us, PagerDuty's default.
+func pagerDutyRegion(v string) (string, error) {
+	switch r := strings.ToLower(strings.TrimSpace(v)); r {
+	case "", regionUS:
+		return regionUS, nil
+	case regionEU:
+		return regionEU, nil
+	}
+	return "", fmt.Errorf("pagerduty_region %q: want %s or %s", v, regionUS, regionEU)
+}
+
+func otherRegion(r string) string {
+	if r == regionEU {
+		return regionUS
+	}
+	return regionEU
 }
 
 // LoadConfigFile returns only what config.yaml holds, without environment or

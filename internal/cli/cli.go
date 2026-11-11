@@ -347,6 +347,7 @@ func (r *runner) wrap(spec commandSpec, body func(context.Context, *Env) error) 
 			Interrupted:      r.interrupts.ch,
 			RequestInterrupt: r.interrupts.interrupt,
 			Now:              r.opts.Now,
+			given:            givenSettings(cmd.Flags()),
 			keychain:         r.opts.Keychain,
 			newKeyProvider:   r.opts.NewKeyProvider,
 			newClients:       r.opts.NewClients,

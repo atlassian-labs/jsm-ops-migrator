@@ -131,9 +131,10 @@ func writeReport(env *Env, heading string, report preflight.Report) error {
 }
 
 type savedConfig struct {
-	Site    string `json:"site,omitempty"`
-	CloudID string `json:"cloud_id,omitempty"`
-	OrgID   string `json:"org_id,omitempty"`
+	Site            string `json:"site,omitempty"`
+	CloudID         string `json:"cloud_id,omitempty"`
+	OrgID           string `json:"org_id,omitempty"`
+	PagerDutyRegion string `json:"pagerduty_region,omitempty"`
 }
 
 // loginResult is what login reports. It names credentials, never their
@@ -154,9 +155,9 @@ type loginResult struct {
 	NotSaved savedConfig `json:"not_saved,omitzero"`
 
 	// What this login stored, saved and removed, for the summaries.
-	storedNow           []credentials.Kind
-	savedSite, savedOrg bool
-	removed             []string // "site", "organization"
+	storedNow                        []credentials.Kind
+	savedSite, savedOrg, savedRegion bool
+	removed                          []string // "site", "organization"
 }
 
 func writeLoginResult(env *Env, res loginResult) error {
@@ -196,7 +197,7 @@ func writeLoginResult(env *Env, res loginResult) error {
 func settingsText(c savedConfig) string {
 	var settings []string
 	for _, s := range []struct{ name, value string }{
-		{"site", c.Site}, {"cloudId", c.CloudID}, {"organization", c.OrgID},
+		{"site", c.Site}, {"cloudId", c.CloudID}, {"organization", c.OrgID}, {"PagerDuty region", c.PagerDutyRegion},
 	} {
 		if s.value != "" {
 			settings = append(settings, s.name+" "+s.value)
@@ -212,13 +213,17 @@ func loginSummary(res loginResult) []string {
 	if len(res.storedNow) > 0 {
 		parts = append(parts, "stored the "+kindLabels(res.storedNow))
 	}
-	switch {
-	case res.savedSite && res.savedOrg:
-		parts = append(parts, "saved the site and organization")
-	case res.savedSite:
-		parts = append(parts, "saved the site")
-	case res.savedOrg:
-		parts = append(parts, "saved the organization")
+	var saved []string
+	for _, s := range []struct {
+		name string
+		ok   bool
+	}{{"site", res.savedSite}, {"organization", res.savedOrg}, {"PagerDuty region", res.savedRegion}} {
+		if s.ok {
+			saved = append(saved, s.name)
+		}
+	}
+	if len(saved) > 0 {
+		parts = append(parts, "saved the "+joinWords(saved))
 	}
 	notSaved := settingsText(res.NotSaved)
 	switch {

@@ -48,6 +48,9 @@ func runPlan(ctx context.Context, env *Env, f PlanFlags) error {
 		return err
 	}
 
+	if env.Config.PagerDutyRegion, err = pagerDutyRegion(env.Config.PagerDutyRegion); err != nil {
+		return err
+	}
 	clients, err := env.Clients(creds)
 	if err != nil {
 		return err
