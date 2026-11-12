@@ -94,19 +94,38 @@ func (r *Redactor) String(s string) string {
 	})
 	s = schemeRe.ReplaceAllString(s, "${1}${2}"+Redacted)
 	s = pdTokenRe.ReplaceAllString(s, "${1}"+Redacted)
-	s = keyValueRe.ReplaceAllStringFunc(s, func(m string) string {
+	s = r.pairs(s, false)
+	s = jsmPhoneRe.ReplaceAllString(s, Redacted)
+	return phoneRe.ReplaceAllString(s, Redacted)
+}
+
+// pairs redacts the value of every sensitive key-value pair in s. A match
+// takes the whole value of its key, so the value of a key that is not
+// sensitive is searched for pairs of its own, as in "config: token=…".
+// Inside a value (nested), only the forms a credential takes count: key=value
+// and quoted pairs. Prose such as "protected by a passphrase: set …" is not
+// one. Each value is shorter than its match, so the search ends.
+func (r *Redactor) pairs(s string, nested bool) string {
+	return keyValueRe.ReplaceAllStringFunc(s, func(m string) string {
 		sub := keyValueRe.FindStringSubmatch(m)
 		key, value := sub[2], sub[4]
-		if !IsSensitiveKey(key) || isRedacted(value) {
+		if isRedacted(value) {
 			return m
+		}
+		if !IsSensitiveKey(key) || (nested && !strictPair(sub)) {
+			return sub[1] + key + sub[3] + r.pairs(value, true)
 		}
 		if q := value[:1]; q == `"` || q == "'" {
 			return sub[1] + key + sub[3] + q + Redacted + q
 		}
 		return sub[1] + key + sub[3] + Redacted
 	})
-	s = jsmPhoneRe.ReplaceAllString(s, Redacted)
-	return phoneRe.ReplaceAllString(s, Redacted)
+}
+
+// strictPair reports whether a keyValueRe match is written as a credential
+// is: with '=', or with its key or value quoted.
+func strictPair(sub []string) bool {
+	return strings.Contains(sub[3], "=") || sub[1] == `"` || strings.HasPrefix(sub[4], `"`) || strings.HasPrefix(sub[4], "'")
 }
 
 // isRedacted reports whether a value holds nothing but "[redacted]" and
@@ -192,8 +211,19 @@ func hasUnredactedAuthHeader(s string) bool {
 }
 
 func hasSensitiveKeyValue(s string) bool {
+	return hasSensitivePair(s, false)
+}
+
+// hasSensitivePair is hasSensitiveKeyValue with the rules of pairs.
+func hasSensitivePair(s string, nested bool) bool {
 	for _, sub := range keyValueRe.FindAllStringSubmatch(s, -1) {
-		if IsSensitiveKey(sub[2]) && !isRedacted(sub[4]) {
+		if isRedacted(sub[4]) {
+			continue
+		}
+		if IsSensitiveKey(sub[2]) && (!nested || strictPair(sub)) {
+			return true
+		}
+		if hasSensitivePair(sub[4], true) {
 			return true
 		}
 	}

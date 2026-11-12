@@ -1,0 +1,31 @@
+# Changes from plan v1 to v2
+
+1 item added, 1 removed, 2 changed. 3 new messages, 1 no longer raised, 1 changed.
+
+## Added
+
+- `teams/PT1-ops` manual: Turn on Operations for Platform by hand
+
+## Removed
+
+- `users/PU4` create: Invite Drew Example
+
+## Changed
+
+- `users/PU3`: action (create, now skip), summary. Now: Casey Example is a stakeholder
+- `teams/PT1`: depends_on. Now: Create team Platform
+
+## New messages
+
+- warning `users/PU3/stakeholder`: Casey Example is a PagerDuty stakeholder and is left out.
+- manual task `teams/PT1-ops/enable_ops`: Open the team in JSM and turn on Operations.
+- information `no_services`: The account has no services.
+
+## No longer raised
+
+- information `no_escalations`: The account has no escalation policies.
+
+## Changed messages
+
+- warning `teams/PT1/member_dropped`: Casey Example is not migrated, so they are not added to Platform.
+  Was: An older text with the same ID.

@@ -328,6 +328,25 @@ func (w *Workspace) CommitArtifactDir(tmpRel, finalRel string) error {
 	return retryRename(func() error { return root.Rename(tmpRel, finalRel) })
 }
 
+// RemoveArtifactDir removes the folder rel under artifacts/ with everything in
+// it, such as a version folder whose writing failed before it was committed.
+// Removing a missing folder succeeds. The removal goes through an os.Root, so
+// a symbolic link cannot take it outside artifacts/.
+func (w *Workspace) RemoveArtifactDir(rel string) error {
+	if !filepath.IsLocal(rel) || filepath.Clean(rel) == "." {
+		return fmt.Errorf("artifact folder must be a local path under artifacts: %q", rel)
+	}
+	root, err := os.OpenRoot(w.ArtifactsDir())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.RemoveAll(rel)
+}
+
 func (w *Workspace) artifactsRoot(rel string) (*os.Root, error) {
 	if !filepath.IsLocal(rel) {
 		return nil, fmt.Errorf("artifact path must be local: %q", rel)

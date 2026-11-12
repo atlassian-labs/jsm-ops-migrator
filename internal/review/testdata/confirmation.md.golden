@@ -1,0 +1,12 @@
+# Confirmation of plan v2
+
+- Confirmed: 2026-11-12 10:10:00 UTC, by Atlassian account `712020:0000cccc`, through the acceptance file
+- plan.json: `sha256:784992a95163c6071a0e07883bfd0b053acc3d5a2f796c6f0712b601463bda19`
+- No API shows whether the account is an org admin, so this record says who confirmed, not that they are one.
+
+## Accepted warnings
+
+- `teams/PT1/member_dropped`: Casey Example is not migrated, so they are not added to Platform.
+  Reason: Casey left the company.
+- `users/PU3/stakeholder`: Casey Example is a PagerDuty stakeholder and is left out.
+  Reason: Stakeholders stay in PagerDuty until the cut-over.

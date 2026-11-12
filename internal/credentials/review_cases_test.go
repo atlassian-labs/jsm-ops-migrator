@@ -25,6 +25,10 @@ func TestRedactTextWholeValues(t *testing.T) {
 		{"token: 'abc def ghi'", "def ghi"},
 		{"contact 90-5551112233 already exists", "5551112233"},
 		{"proxy https://user:proxysecret@proxy.example.com:8080", "proxysecret"},
+		// A pair inside the value of a key that is not sensitive.
+		{"Webhook config: token=abcdef1234567890", "abcdef1234567890"},
+		{"settings: api_key=k123456789 and more", "k123456789"},
+		{"a: b: password=nested-secret-1", "nested-secret-1"},
 	}
 	for _, c := range cases {
 		out := credentials.RedactText(c.in)
@@ -38,8 +42,10 @@ func TestRedactTextWholeValues(t *testing.T) {
 			t.Errorf("DetectSensitive(%q) found nothing", c.in)
 		}
 	}
-	// Ordinary text with hyphens and colons stays.
-	for _, keep := range []string{"plan v3 created on 2026-10-27", "PABC123 maps to team-42", "https://example.com:8443/path"} {
+	// Ordinary text with hyphens and colons stays, and so does a sentence
+	// that names a credential inside another key's value.
+	for _, keep := range []string{"plan v3 created on 2026-10-27", "PABC123 maps to team-42", "https://example.com:8443/path",
+		"state.db's key is not available: this workspace is protected by a passphrase: set JSM_OPS_MIGRATOR_PASSPHRASE"} {
 		if got := credentials.RedactText(keep); got != keep {
 			t.Errorf("RedactText(%q) = %q, want unchanged", keep, got)
 		}
