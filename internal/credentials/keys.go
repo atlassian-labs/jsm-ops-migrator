@@ -1,6 +1,9 @@
 package credentials
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // secretKeys are field, header and parameter names whose values are
 // credentials. http_cal_url and web_cal_url are PagerDuty calendar feed URLs,
@@ -43,8 +46,24 @@ var personalKeys = map[string]bool{
 	"device_id":    true,
 }
 
+// normalizeKey writes a name in snake_case, so accessToken, access-token and
+// ACCESS_TOKEN all match access_token. camelCase is split into words, the
+// way JSON APIs such as JSM's name their fields: phoneNumber, webCalUrl,
+// APIKey.
 func normalizeKey(key string) string {
-	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "-", "_")
+	runes := []rune(strings.TrimSpace(key))
+	var b strings.Builder
+	for i, c := range runes {
+		if unicode.IsUpper(c) && i > 0 {
+			prev := runes[i-1]
+			nextLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
+				b.WriteByte('_')
+			}
+		}
+		b.WriteRune(unicode.ToLower(c))
+	}
+	return strings.ReplaceAll(b.String(), "-", "_")
 }
 
 // IsSecretKey reports whether a field, header or parameter name holds a

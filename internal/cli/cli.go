@@ -15,39 +15,28 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
 )
 
-// Exit codes. ExitAwaitingInput means a credential or an answer is missing:
-// the command did what it could without it, and runs fully once it is given.
-// The Run engine adds the codes for Blocked, Validation failed and Partially
-// complete as error types that implement ExitCoder.
+// Exit codes. messages holds them all, with the functions that give an error
+// the codes for Blocked, Awaiting input, Validation failed and Partially
+// complete; these are the ones the command layer sets itself.
 const (
-	ExitOK            = 0
-	ExitError         = 1
-	ExitUsage         = 2
-	ExitAwaitingInput = 4
+	ExitOK    = messages.ExitOK
+	ExitError = messages.ExitError
+	ExitUsage = messages.ExitUsage
+	// ExitAwaitingInput means a credential or an answer is missing: the
+	// command did what it could without it, and runs fully once it is given.
+	ExitAwaitingInput = messages.ExitAwaitingInput
 )
-
-// ExitCoder is an error that chooses the process exit code.
-type ExitCoder interface {
-	error
-	ExitCode() int
-}
 
 // ErrNotImplemented is returned by command bodies that later tasks replace.
 var ErrNotImplemented = errors.New("not implemented yet")
 
-// awaitingInputError exits with ExitAwaitingInput.
-type awaitingInputError struct{ err error }
-
-func (e awaitingInputError) Error() string { return e.err.Error() }
-func (e awaitingInputError) Unwrap() error { return e.err }
-func (e awaitingInputError) ExitCode() int { return ExitAwaitingInput }
-
-func awaitingInput(err error) error { return awaitingInputError{err} }
+func awaitingInput(err error) error { return messages.AwaitingInput(err) }
 
 // Options are the seams cmd/jsm-ops-migrator wires and tests replace.
 type Options struct {
@@ -168,13 +157,10 @@ func exitCode(err error) int {
 	if err == nil {
 		return ExitOK
 	}
-	var ec ExitCoder
-	if errors.As(err, &ec) {
-		if c := ec.ExitCode(); c != ExitOK {
-			return c
-		}
+	if c, ok := messages.ExitCodeOf(err); ok && c != ExitOK {
+		return c
 	}
-	// A failure never exits 0, even if an ExitCoder says so.
+	// A failure never exits 0.
 	return ExitError
 }
 

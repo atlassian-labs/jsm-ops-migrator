@@ -328,6 +328,26 @@ func (w *Workspace) CommitArtifactDir(tmpRel, finalRel string) error {
 	return retryRename(func() error { return root.Rename(tmpRel, finalRel) })
 }
 
+// RemoveArtifact removes the file or folder rel under artifacts/, a folder
+// with everything in it, such as a version folder whose writing failed before
+// it was committed, or the temporary file of a write that crashed. Removing
+// something missing succeeds. The removal goes through an os.Root, so a
+// symbolic link cannot take it outside artifacts/.
+func (w *Workspace) RemoveArtifact(rel string) error {
+	if !filepath.IsLocal(rel) || filepath.Clean(rel) == "." {
+		return fmt.Errorf("artifact path must be a local path under artifacts: %q", rel)
+	}
+	root, err := os.OpenRoot(w.ArtifactsDir())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.RemoveAll(rel)
+}
+
 func (w *Workspace) artifactsRoot(rel string) (*os.Root, error) {
 	if !filepath.IsLocal(rel) {
 		return nil, fmt.Errorf("artifact path must be local: %q", rel)

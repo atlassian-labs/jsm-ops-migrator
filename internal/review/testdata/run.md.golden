@@ -1,0 +1,14 @@
+# Run 20261112T101500Z-a1b2 of plan v2
+
+State: paused. Started 2026-11-12 10:15:00 UTC, stopped 2026-11-12 10:20:00 UTC.
+
+5 items: 3 done, 0 failed, 1 unknown, 0 declined, 1 pending.
+
+## Items in the order apply takes them
+
+1. `users/PU1` create: done (status 200, request req-1). PagerDuty `user PU1` is JSM `account 712020:0000bbbb`
+2. `users/PU2` map: done. PagerDuty `user PU2` is JSM `account 712020:0000aaaa`
+3. `users/PU3` skip: done
+4. `teams/PT1` create: unknown
+   - manual task `teams/PT1/unknown_outcome`: The create timed out. Check whether team Platform exists before resuming.
+5. `teams/PT1-ops` manual: pending
