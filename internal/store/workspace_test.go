@@ -123,6 +123,61 @@ func TestWriteArtifactRefusesSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestRemoveArtifact(t *testing.T) {
+	ws, _ := store.OpenWorkspace(t.TempDir(), true)
+	if err := ws.WriteArtifact(filepath.Join("plans", ".v1.tmp", "plan.md"), []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteArtifact(filepath.Join("plans", "v0", "plan.md"), []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.RemoveArtifact(filepath.Join("plans", ".v1.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(ws.ArtifactsDir(), "plans", ".v1.tmp")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the folder is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws.ArtifactsDir(), "plans", "v0", "plan.md")); err != nil {
+		t.Errorf("a sibling folder was removed: %v", err)
+	}
+	if err := ws.RemoveArtifact(filepath.Join("plans", "missing")); err != nil {
+		t.Errorf("removing a missing folder: %v", err)
+	}
+	for _, bad := range []string{"", ".", "..", filepath.Join("..", "x"), ws.Dir()} {
+		if err := ws.RemoveArtifact(bad); err == nil {
+			t.Errorf("RemoveArtifact(%q) must fail", bad)
+		}
+	}
+	if _, err := os.Stat(ws.ArtifactsDir()); err != nil {
+		t.Errorf("artifacts/ itself is gone: %v", err)
+	}
+}
+
+func TestRemoveArtifactStaysInArtifacts(t *testing.T) {
+	ws, _ := store.OpenWorkspace(t.TempDir(), true)
+	// The kept file is in the folder a removal through the link would reach,
+	// so a removal that followed the link deletes it.
+	outside := t.TempDir()
+	keep := filepath.Join(outside, "sub", "keep")
+	if err := os.MkdirAll(filepath.Dir(keep), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keep, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws.ArtifactsDir(), "link")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating a symbolic link needs Developer Mode or admin rights here: %v", err)
+		}
+		t.Fatal(err)
+	}
+	_ = ws.RemoveArtifact(filepath.Join("link", "sub"))
+	_ = ws.RemoveArtifact("link")
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("a removal followed the link out of artifacts/: %v", err)
+	}
+}
+
 func TestCreateAndCommitArtifacts(t *testing.T) {
 	ws, _ := store.OpenWorkspace(t.TempDir(), true)
 	w, err := ws.CreateArtifact(filepath.Join("logs", "a.log"))

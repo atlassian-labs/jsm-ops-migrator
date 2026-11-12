@@ -1,0 +1,107 @@
+{
+  "version": 2,
+  "created_at": "2026-11-12T10:00:00Z",
+  "reads": [
+    {
+      "side": "pagerduty",
+      "at": "2026-11-12T09:58:00Z",
+      "complete": true
+    },
+    {
+      "side": "jsm",
+      "at": "2026-11-12T09:59:30Z",
+      "complete": false
+    }
+  ],
+  "items": [
+    {
+      "key": "users/PU1",
+      "action": "create",
+      "summary": "Invite Avery Example (avery@example.com)",
+      "pagerduty": {
+        "type": "user",
+        "id": "PU1"
+      },
+      "payload": {
+        "email": "avery@example.com"
+      }
+    },
+    {
+      "key": "users/PU2",
+      "action": "map",
+      "summary": "Blake Example is already in the organization",
+      "pagerduty": {
+        "type": "user",
+        "id": "PU2"
+      },
+      "jsm": {
+        "type": "account",
+        "id": "712020:0000aaaa"
+      }
+    },
+    {
+      "key": "users/PU3",
+      "action": "skip",
+      "summary": "Casey Example is a stakeholder",
+      "pagerduty": {
+        "type": "user",
+        "id": "PU3"
+      }
+    },
+    {
+      "key": "teams/PT1",
+      "action": "create",
+      "summary": "Create team Platform",
+      "depends_on": [
+        "users/PU1",
+        "users/PU2"
+      ],
+      "pagerduty": {
+        "type": "team",
+        "id": "PT1"
+      },
+      "payload": {
+        "displayName": "Platform",
+        "teamType": "MEMBER_INVITE"
+      }
+    },
+    {
+      "key": "teams/PT1-ops",
+      "action": "manual",
+      "summary": "Turn on Operations for Platform by hand",
+      "depends_on": [
+        "teams/PT1"
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "class": "blocker",
+      "code": "jsm_incomplete",
+      "text": "The JSM snapshot is incomplete: the teams list answered 403."
+    },
+    {
+      "class": "warning",
+      "code": "member_dropped",
+      "item": "teams/PT1",
+      "text": "Casey Example is not migrated, so they are not added to Platform."
+    },
+    {
+      "class": "warning",
+      "code": "stakeholder",
+      "item": "users/PU3",
+      "text": "Casey Example is a PagerDuty stakeholder and is left out."
+    },
+    {
+      "class": "manual_task",
+      "code": "enable_ops",
+      "item": "teams/PT1-ops",
+      "text": "Open the team in JSM and turn on Operations."
+    },
+    {
+      "class": "information",
+      "code": "no_services",
+      "text": "The account has no services."
+    }
+  ]
+}
