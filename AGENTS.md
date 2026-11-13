@@ -41,24 +41,27 @@ run the keychain test against the real OS keychain. No other test may touch
 it: the binary's tests in `cmd/jsm-ops-migrator` use a file-backed keychain from
 `testkit`, and the `internal` tests use `testkit.FakeKeychain`. The scripts reach
 no network: a script that sets `JSM_OPS_MIGRATOR_TEST_APIS=healthy` runs the
-binary against `testkit`'s fake APIs, and reads PagerDuty with the real client
-from a `testkit/pdfake` account hosted in the region that
-`JSM_OPS_MIGRATOR_TEST_PAGERDUTY_REGION` names (`us` when empty); the others
-get placeholders.
+binary's real API clients against fakes, a `testkit/pdfake` account hosted in
+the region that `JSM_OPS_MIGRATOR_TEST_PAGERDUTY_REGION` names (`us` when
+empty) and a `testkit/jsmfake` site and organization; the others get
+placeholders.
 
 Credentials come from masked prompts, `login --stdin` or these environment
 variables, never from flags: `JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY`,
 `JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL`, `JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN` and
 `JSM_OPS_MIGRATOR_ORG_API_KEY`. On a machine without a keychain,
-`JSM_OPS_MIGRATOR_PASSPHRASE` protects the workspace instead. The PagerDuty
-client is real: `login` checks the key and finds where the account is hosted,
-`us` or `eu`, which it saves as `pagerduty_region` with the key. Until the JSM
-client exists, `cmd/jsm-ops-migrator` wires `preflight.Placeholders` for the
-Atlassian side, so every check that needs an Atlassian API reports "not
-checked". `login` stores only a credential, and saves only a setting, whose
-check passed, so for now it stores only the PagerDuty key and saves only its
-region. A site in `config.yaml` without its cloudId was never checked and
-counts as not saved.
+`JSM_OPS_MIGRATOR_PASSPHRASE` protects the workspace instead. `login` checks
+the PagerDuty key and finds where the account is hosted, `us` or `eu`, which it
+saves as `pagerduty_region` with the key. It looks up the site's cloudId,
+checks the Atlassian email and API token against JSM Operations, and checks
+the org API key and the organization with the Admin API. `login` stores only a
+credential, and saves only a setting, whose check passed. A site in
+`config.yaml` without its cloudId was never checked and counts as not saved.
+A site under `.jira-dev.com` is an Atlassian staging site, so its JSM
+Operations and Admin calls go to `api.stg.atlassian.com`.
+The public APIs that are still being built (services, contacts and
+notification rules on behalf of other users, and global escalations) are
+reported as not available until they ship.
 
 ## Rules
 
@@ -69,6 +72,9 @@ counts as not saved.
    calls, and only through `internal/httpx`, so every call gets the same
    retries, limits and redaction. Code that reads PagerDuty data defines its
    own paths and types and reads them with `pd.Client.Get` and `pd.List`.
+   Code that calls the Atlassian APIs does the same through `jsm/ops`,
+   `jsm/teams`, `jsm/admin` and `jsm/jira`, which add each API's path prefix,
+   paging and, for the Teams API, the siteId.
 3. **Secrets.** Credentials are `credentials.Secret` values, which print as
    `[redacted]`. They live only in the OS keychain, environment variables or
    the encrypted credentials file, and are never taken as flag values.

@@ -73,6 +73,9 @@ func runLogin(ctx context.Context, env *Env, f LoginFlags) error {
 	if site, err = normalizeSite(site); err != nil {
 		return fmt.Errorf("--site: %w", err)
 	}
+	// The API clients send a staging site's calls to the staging API host,
+	// so they must see the site being checked, not the saved one.
+	env.Config.Site = site
 
 	if env.Config.PagerDutyRegion, err = pagerDutyRegion(env.Config.PagerDutyRegion); err != nil {
 		return err

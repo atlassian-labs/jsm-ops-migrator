@@ -51,9 +51,20 @@ const (
 	atlassianAPIHostStaging = "api.stg.atlassian.com"
 )
 
+// stagingSiteSuffix is the domain Atlassian's staging sites live under.
+const stagingSiteSuffix = ".jira-dev.com"
+
 // siteSuffixes are the domains Atlassian sites live under. The site families
 // refuse any other host, so a mistyped site never receives the API token.
-var siteSuffixes = []string{".atlassian.net", ".jira-dev.com"}
+var siteSuffixes = []string{".atlassian.net", stagingSiteSuffix}
+
+// IsStagingSite reports whether site, a host name such as acme.jira-dev.com,
+// is a staging site. A staging site's JSM Operations and Admin calls go to
+// the staging API host, so a client for one is built with Config.Staging.
+func IsStagingSite(site string) bool {
+	s := strings.ToLower(site)
+	return strings.HasSuffix(s, stagingSiteSuffix) && len(s) > len(stagingSiteSuffix)
+}
 
 // needs lists the credentials each family sends; a family missing from it is
 // unknown.

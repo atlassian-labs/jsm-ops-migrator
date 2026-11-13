@@ -8,8 +8,9 @@ env JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=operator@example.com
 env JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN=atl-canary-0123456789
 env JSM_OPS_MIGRATOR_ORG_API_KEY=org-canary-0123456789
 
-# The API clients are placeholders for now, so no check can run, and nothing
-# is stored or saved. Login still finishes.
+# Without the fake APIs the scripts reach no API: every client is a
+# placeholder, so no check can run, and nothing is stored or saved. Login
+# still finishes.
 exec jsm-ops-migrator login --site ACME --org-id org-1
 stdout 'PagerDuty API key +not checked$'
 stdout 'PagerDuty API key, Site and Org API key: the API clients are not built yet.'
