@@ -46,7 +46,9 @@ For now, this README is the documentation. A post-migration guide for the areas 
 
 ## Tests
 
-Tests and a CI pipeline will be added together with the code.
+`go test ./...` runs the tests. On every pull request, every push to `main` and nightly, CI builds and
+tests the CLI on Linux, macOS and Windows, cross-builds the six release targets, and runs the race
+detector, the fuzz targets, the linter, vulnerability and license checks, and a scan of the test data.
 
 ## Contributions
 
