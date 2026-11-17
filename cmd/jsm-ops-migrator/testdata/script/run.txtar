@@ -1,0 +1,50 @@
+# plan and apply with the placeholder steps write every review file and run
+# record, and send nothing.
+env HOME=$WORK/home
+env USERPROFILE=$WORK/home
+env JSM_OPS_MIGRATOR_TEST_APIS=healthy
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+env JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=operator@example.com
+env JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN=atl-canary-0123456789
+env JSM_OPS_MIGRATOR_ORG_API_KEY=org-canary-0123456789
+env JSM_OPS_MIGRATOR_JSM_PLAN=premium
+env W=$WORK/home/jsm-ops-migrator/artifacts
+
+exec jsm-ops-migrator login --site acme --org-id org-1
+
+# apply has nothing to run before plan.
+! exec jsm-ops-migrator apply
+stderr 'there is no plan to apply yet'
+
+exec jsm-ops-migrator plan
+stdout 'Read PagerDuty: complete'
+stdout 'Read JSM: complete'
+stdout 'Plan v1: 0 calls'
+stdout 'Messages: 0 blockers, 0 warnings, 0 manual tasks, 1 information'
+exists $W/plans/v1/plan.json
+exists $W/plans/v1/plan.md
+exists $W/plans/v1/diff.md
+exists $W/plans/v1/risk-queue.md
+exists $W/plans/v1/acceptance-template.yaml
+grep 'placeholder_no_steps' $W/plans/v1/risk-queue.md
+
+# Without a terminal, the acceptance file is the confirmation.
+! exec jsm-ops-migrator apply
+stderr 'plan v1 needs a confirmation: fill in .*acceptance-template.yaml and give it with --accept-file'
+! exists $W/runs
+
+exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
+stdout 'of plan v1: 0 of 0 items done'
+exists $W/plans/v1/confirmation.md
+grep 'account-of-org-1' $W/plans/v1/confirmation.md
+! exists $WORK/home/jsm-ops-migrator/active-run.json
+
+# A version is applied once, and a plan with nothing new says so.
+! exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
+stderr 'plan v1 was applied by run'
+exec jsm-ops-migrator plan
+stdout 'Plan v1 is unchanged since run .* applied it: there is nothing new to apply'
+! exists $W/plans/v2
+
+! stdout 'canary'
+! stderr 'canary'

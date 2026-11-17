@@ -74,8 +74,10 @@ const (
 	// Paused means the run stopped between two calls, on a pause request or
 	// the first Ctrl+C.
 	Paused RunState = "paused"
-	// Interrupted means the run stopped with a call that may have been in
-	// flight: a second Ctrl+C or a crash. resume looks that call up first.
+	// Interrupted means the run stopped with a call that may have taken
+	// effect without the run knowing what it made: one in flight at a second
+	// Ctrl+C or a crash, or one whose outcome stayed unknown after its
+	// lookup. resume looks those calls up first.
 	Interrupted RunState = "interrupted"
 	Completed   RunState = "completed"
 )

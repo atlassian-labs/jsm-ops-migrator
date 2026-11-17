@@ -19,6 +19,7 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/pd"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
+	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit/pdfake"
@@ -45,6 +46,9 @@ type loginSetup struct {
 	pd *pdfake.Fake
 	// sites holds the site each built set of clients was for.
 	sites []string
+	// steps, when set, are the steps plan and apply run instead of the
+	// placeholders.
+	steps []engine.Step
 }
 
 func newLoginSetup(t *testing.T) *loginSetup {
@@ -85,6 +89,9 @@ func (s *loginSetup) run(args ...string) result {
 		Keychain:   s.kc,
 		NewClients: s.clients,
 		Now:        func() time.Time { return loginNow },
+	}
+	if s.steps != nil {
+		opts.NewSteps = func(*Env, credentials.Set) ([]engine.Step, error) { return s.steps, nil }
 	}
 	h := hooks{
 		isTerminal: func(any) bool { return s.terminal },
@@ -515,7 +522,7 @@ func TestPlanRunsThePreflightChecks(t *testing.T) {
 	s.run("login", "--site", "acme", "--org-id", "org-1")
 	setCredentialsInEnv(t, credentials.Set{})
 	r := s.run("plan", "--jsm-plan", "premium")
-	if r.code != ExitError || !strings.Contains(r.stderr, "plan: reading PagerDuty and JSM is not implemented yet") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Plan v1: 0 calls") {
 		t.Fatalf("exit %d, stderr %q\n%s", r.code, r.stderr, r.stdout)
 	}
 	for _, want := range []string{"Pre-flight checks", "Secret storage", "kept in the OS keychain", "Org admin", "warning"} {
@@ -587,8 +594,9 @@ func TestPlanAsksForTheJSMPlanOnceAndSavesIt(t *testing.T) {
 func TestPlanOnlyPagerDutyNeedsNoJSMCredentials(t *testing.T) {
 	s := newLoginSetup(t)
 	setCredentialsInEnv(t, credentials.Set{}, credentials.PagerDutyKey)
+	// Nothing was read from JSM before, so there is no plan to build yet.
 	r := s.run("plan", "--only", "pagerduty")
-	if r.code != ExitError || !strings.Contains(r.stderr, "not implemented yet") {
+	if r.code != ExitError || !strings.Contains(r.stderr, "there is no JSM read to build on yet") {
 		t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
 	}
 	if strings.Contains(r.stdout, "Site") || slices.ContainsFunc(s.apis.Calls(), func(c string) bool { return !strings.HasPrefix(c, "pagerduty") }) {

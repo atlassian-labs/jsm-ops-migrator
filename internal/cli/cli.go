@@ -17,6 +17,7 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
+	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
 )
@@ -51,6 +52,9 @@ type Options struct {
 	// NewClients builds the API clients the checks use from the credentials
 	// being checked. Nil means preflight.Placeholders.
 	NewClients func(env *Env, creds credentials.Set) (preflight.Clients, error)
+	// NewSteps builds the steps plan and apply run, with the credentials the
+	// pre-flight checks passed. Nil means engine.Placeholders.
+	NewSteps func(env *Env, creds credentials.Set) ([]engine.Step, error)
 	// RenderError prints an error that stopped a command. The default writes
 	// "Error: <message>" to stderr, so stdout carries only what a command
 	// renders.
@@ -319,7 +323,13 @@ func (r *runner) wrap(spec commandSpec, body func(context.Context, *Env) error) 
 		if err != nil {
 			return renderHere(err)
 		}
+		// Prompts can contain operator input. Keep them off JSON stdout and out of the workspace log.
+		promptOut := r.stdout
+		if r.global.output == string(OutputJSON) {
+			promptOut = r.stderr
+		}
 		env := &Env{
+			promptOut:        promptOut,
 			Command:          spec.name,
 			Workspace:        ws,
 			Config:           cfg,
@@ -337,6 +347,7 @@ func (r *runner) wrap(spec commandSpec, body func(context.Context, *Env) error) 
 			keychain:         r.opts.Keychain,
 			newKeyProvider:   r.opts.NewKeyProvider,
 			newClients:       r.opts.NewClients,
+			newSteps:         r.opts.NewSteps,
 			ask:              r.hooks.ask,
 			choose:           r.hooks.choose,
 			setSummary:       func(lines []string) { r.summary = lines },

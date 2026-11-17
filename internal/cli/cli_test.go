@@ -121,6 +121,7 @@ func stubBodies() bodies {
 	b := defaultBodies()
 	b.login = func(context.Context, *Env, LoginFlags) error { return notImplemented("login") }
 	b.plan = func(context.Context, *Env, PlanFlags) error { return notImplemented("plan") }
+	b.apply = func(context.Context, *Env, ApplyFlags) error { return notImplemented("apply") }
 	return b
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
+	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
 )
@@ -60,6 +61,8 @@ type Env struct {
 	keychain       credentials.Keychain
 	newKeyProvider func(context.Context, *Env) (store.KeyProvider, error)
 	newClients     func(*Env, credentials.Set) (preflight.Clients, error)
+	newSteps       func(*Env, credentials.Set) ([]engine.Step, error)
+	promptOut      io.Writer
 	ask            func(ctx context.Context, in io.Reader, out io.Writer, color bool, heading string, qs []tui.Question) ([]string, error)
 	choose         func(ctx context.Context, in io.Reader, out io.Writer, color bool, title, description string, options []tui.Option, selected string) (string, error)
 	setSummary     func([]string)
@@ -104,7 +107,7 @@ func (e *Env) Ask(ctx context.Context, heading string, qs []tui.Question) ([]str
 	if !e.Interactive || e.ask == nil {
 		return nil, errors.New("cannot ask: not running in a terminal")
 	}
-	return e.ask(ctx, e.Stdin, e.Stdout, e.Color, heading, qs)
+	return e.ask(ctx, e.Stdin, e.promptOut, e.Color, heading, qs)
 }
 
 // Choose asks for one of the options in the terminal. Callers check
@@ -113,7 +116,7 @@ func (e *Env) Choose(ctx context.Context, title, description string, options []t
 	if !e.Interactive || e.choose == nil {
 		return "", errors.New("cannot ask: not running in a terminal")
 	}
-	return e.choose(ctx, e.Stdin, e.Stdout, e.Color, title, description, options, selected)
+	return e.choose(ctx, e.Stdin, e.promptOut, e.Color, title, description, options, selected)
 }
 
 // Clients builds the API clients for the given credentials.
@@ -122,6 +125,14 @@ func (e *Env) Clients(creds credentials.Set) (preflight.Clients, error) {
 		return preflight.Placeholders(), nil
 	}
 	return e.newClients(e, creds)
+}
+
+// Steps builds the steps plan and apply run.
+func (e *Env) Steps(creds credentials.Set) ([]engine.Step, error) {
+	if e.newSteps == nil {
+		return engine.Placeholders(), nil
+	}
+	return e.newSteps(e, creds)
 }
 
 // isTerminal checks the file behind a stream. A stream without one, such as a

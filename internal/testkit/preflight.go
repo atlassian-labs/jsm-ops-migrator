@@ -18,7 +18,8 @@ import (
 type FakeAPIs struct {
 	PagerDutyKey, AtlassianEmail, AtlassianToken, OrgAPIKey string
 
-	AbilitiesErr error
+	PagerDutyAccount string
+	AbilitiesErr     error
 	// Sites maps a site to its tenant; an unknown site is httperr.ErrNotFound.
 	Sites     map[string]preflight.Tenant
 	TenantErr error
@@ -62,6 +63,8 @@ type fakeClients struct {
 }
 
 func accepted(want, got string) bool { return want == "" || want == got }
+
+func (c fakeClients) AccountHost(context.Context) (string, error) { return c.f.PagerDutyAccount, nil }
 
 func (c fakeClients) Abilities(context.Context) ([]string, error) {
 	c.f.record("pagerduty abilities")
@@ -142,10 +145,11 @@ func (c fakeClients) FindUser(_ context.Context, orgID string, email credentials
 // org-1, which has operator@example.com.
 func HealthyAPIs(now time.Time) *FakeAPIs {
 	return &FakeAPIs{
-		Sites:   map[string]preflight.Tenant{"acme.atlassian.net": {CloudID: "cloud-1", ServerTime: now}},
-		APIs:    map[preflight.API]bool{preflight.ServicesAPI: true, preflight.UserNotificationsAPI: true, preflight.GlobalEscalationsAPI: true},
-		Orgs:    []preflight.Org{{ID: "org-1", Name: "Acme"}},
-		Members: map[string][]string{"org-1": {"operator@example.com"}},
+		PagerDutyAccount: "acme.pagerduty.com",
+		Sites:            map[string]preflight.Tenant{"acme.atlassian.net": {CloudID: "cloud-1", ServerTime: now}},
+		APIs:             map[preflight.API]bool{preflight.ServicesAPI: true, preflight.UserNotificationsAPI: true, preflight.GlobalEscalationsAPI: true},
+		Orgs:             []preflight.Org{{ID: "org-1", Name: "Acme"}},
+		Members:          map[string][]string{"org-1": {"operator@example.com"}},
 	}
 }
 

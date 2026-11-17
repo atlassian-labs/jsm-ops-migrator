@@ -289,3 +289,21 @@ func TestCalendarURLsNeverReachTheCaller(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountHost(t *testing.T) {
+	for _, tc := range []struct{ link, host string }{
+		{"https://Acme.pagerduty.com/users/P1", "acme.pagerduty.com"},
+		{"https://acme.eu.pagerduty.com/users/P1", "acme.eu.pagerduty.com"},
+		{"https://example.com/users/P1", ""}, {"", ""},
+	} {
+		f := pdfake.New(t, key)
+		f.Answer("/users", map[string]any{"users": []map[string]string{{"html_url": tc.link}}})
+		host, err := f.Client().AccountHost(t.Context())
+		if host != tc.host || (tc.host == "" && !errors.Is(err, httperr.ErrBadResponse)) || (tc.host != "" && err != nil) {
+			t.Errorf("host=%q, err=%v", host, err)
+		}
+		if req := f.Requests()[0]; req.Query.Get("limit") != "1" {
+			t.Errorf("query %v", req.Query)
+		}
+	}
+}

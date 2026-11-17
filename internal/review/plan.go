@@ -105,8 +105,21 @@ func (s Side) Label() string {
 	return string(s)
 }
 
+// MigrationAccount identifies one side independently of the credentials used.
+// ID is the PagerDuty account host or the JSM cloud ID.
+type MigrationAccount struct {
+	ID    string `json:"account_id,omitempty"`
+	OrgID string `json:"org_id,omitempty"`
+}
+
+func (a MigrationAccount) Valid(side Side) bool {
+	valid := func(s string) bool { return plainRef(s) && len(screenID(s)) == 0 }
+	return valid(a.ID) && ((side == PagerDuty && a.OrgID == "") || (side == JSM && valid(a.OrgID)))
+}
+
 // Read is one read of a side that the plan was built from.
 type Read struct {
+	MigrationAccount
 	Side     Side      `json:"side"`
 	At       time.Time `json:"at"`
 	Complete bool      `json:"complete"`
@@ -147,6 +160,9 @@ func (p Plan) Check() error {
 	for _, r := range p.Reads {
 		if r.Side != PagerDuty && r.Side != JSM {
 			bad("read of unknown side %s", quote(string(r.Side)))
+		}
+		if r.MigrationAccount != (MigrationAccount{}) && !r.Valid(r.Side) {
+			bad("invalid migration account for %s", r.Side.Label())
 		}
 		incomplete = incomplete || !r.Complete
 	}
@@ -245,26 +261,8 @@ func (it Item) check(i int, before map[string]bool) []error {
 		bad("its key, a dependency or a reference holds sensitive data (%s)", strings.Join(slices.Compact(rules), ", "))
 	}
 	if len(it.Payload) > 0 {
-		// A second value after the first would be dropped from plan.json.
-		if !json.Valid(it.Payload) {
-			bad("%w", errNotOneJSONValue)
-			return errs
-		}
-		found, err := payloadFindings(it.Payload)
-		switch {
-		case err != nil:
-			bad("%w", err)
-		case len(found) > 0:
-			var all []string
-			for _, f := range found {
-				all = append(all, f.rules...)
-			}
-			slices.Sort(all)
-			where := quote(found[0].path)
-			if len(found) > 1 {
-				where += fmt.Sprintf(" and %d more", len(found)-1)
-			}
-			bad("its payload holds sensitive data (%s) at %s", strings.Join(slices.Compact(all), ", "), where)
+		if err := ScreenPayload(it.Payload); err != nil {
+			bad("its %w", err)
 		}
 	}
 	return errs
@@ -328,7 +326,7 @@ func Hash(data []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// ContentHash names what a plan would do: its items and messages, without
+// ContentHash names what a plan would do: its accounts, items and messages, without
 // its version, its time or when the sides were read. Two plans with the same
 // content hash are the same plan, so plan makes no new version for it.
 func ContentHash(p Plan) (string, error) {
@@ -336,10 +334,17 @@ func ContentHash(p Plan) (string, error) {
 		return "", err
 	}
 	n := normalize(p)
+	var accounts []MigrationAccount
+	for _, read := range n.Reads {
+		if read.MigrationAccount != (MigrationAccount{}) {
+			accounts = append(accounts, read.MigrationAccount)
+		}
+	}
 	data, err := encodeJSON(struct {
+		Accounts []MigrationAccount `json:"accounts,omitempty"`
 		Items    []Item             `json:"items"`
 		Messages []messages.Message `json:"messages"`
-	}{n.Items, n.Messages})
+	}{accounts, n.Items, n.Messages})
 	if err != nil {
 		return "", err
 	}

@@ -26,6 +26,7 @@ type PagerDuty interface {
 	// Abilities lists the account's abilities (GET /abilities), the
 	// cheapest call that proves the key works.
 	Abilities(ctx context.Context) ([]string, error)
+	AccountHost(ctx context.Context) (string, error)
 }
 
 // Atlassian is the site and JSM Operations, called with the Atlassian account
@@ -105,6 +106,7 @@ type notBuilt struct{}
 func (notBuilt) Error() string        { return "the API clients are not built yet" }
 func (notBuilt) Is(target error) bool { return target == httperr.ErrUnavailable }
 
+func (p placeholder) AccountHost(context.Context) (string, error)        { return "", p.err() }
 func (p placeholder) Abilities(context.Context) ([]string, error)        { return nil, p.err() }
 func (p placeholder) TenantInfo(context.Context, string) (Tenant, error) { return Tenant{}, p.err() }
 func (p placeholder) CheckAccess(context.Context, string) error          { return p.err() }

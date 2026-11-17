@@ -128,6 +128,8 @@ type Check struct {
 // Report is the result of a run.
 type Report struct {
 	Checks []Check `json:"checks"`
+	// PagerDutyAccount identifies the source across API key rotations.
+	PagerDutyAccount string `json:"pagerduty_account,omitempty"`
 	// CloudID is the cloudId the site gave, or empty when it was not looked
 	// up.
 	CloudID string `json:"cloud_id,omitempty"`
@@ -233,6 +235,11 @@ func (r *run) pagerDutyKey() (Status, string) {
 	_, err := r.c.PagerDuty.Abilities(r.ctx)
 	switch {
 	case err == nil:
+		account, err := r.c.PagerDuty.AccountHost(r.ctx)
+		if err != nil {
+			return notChecked(err)
+		}
+		r.report.PagerDutyAccount = account
 		// PagerDuty does not say whether a key is read-only, so this is a
 		// reminder, not a check.
 		return OK, "works" + r.source(credentials.PagerDutyKey) +

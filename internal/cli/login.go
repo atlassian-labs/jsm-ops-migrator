@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/discover"
+
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
@@ -99,6 +101,12 @@ func runLogin(ctx context.Context, env *Env, f LoginFlags) error {
 	})
 	if err != nil {
 		return err
+	}
+
+	for side, account := range migrationAccounts(report, orgID) {
+		if err := discover.CheckAccount(ctx, st, side, account); err != nil {
+			return err
+		}
 	}
 
 	// Only a credential whose check passed is stored. A missing one counts as
@@ -208,13 +216,14 @@ func findPagerDutyRegion(ctx context.Context, env *Env, creds credentials.Set, c
 			env.Config.PagerDutyRegion = tried
 		}
 	}
-	clients.PagerDuty = answeredAbilities{abilities: abilities, err: err}
+	clients.PagerDuty = answeredAbilities{PagerDuty: clients.PagerDuty, abilities: abilities, err: err}
 	return clients, nil
 }
 
 // answeredAbilities is a PagerDuty client whose /abilities answer is already
 // known.
 type answeredAbilities struct {
+	preflight.PagerDuty
 	abilities []string
 	err       error
 }

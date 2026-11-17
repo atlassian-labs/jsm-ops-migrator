@@ -37,6 +37,39 @@ func screenID(s string) []string {
 	return slices.Compact(rules)
 }
 
+// ScreenID returns the names of the rules an ID matches, as a whole or by its
+// parts, as Plan.Check screens keys and references: a snapshot keeps its
+// objects' IDs in clear, so they get the same screen.
+func ScreenID(s string) []string { return screenID(s) }
+
+// ScreenPayload refuses a payload that is not exactly one JSON value, that
+// gives a key twice, or that holds sensitive data, as Plan.Check refuses an
+// item's payload. The error names the rules and the field, never the value.
+// The snapshots plan reads are screened with it before they are sealed.
+func ScreenPayload(payload []byte) error {
+	// A second value after the first would be dropped from plan.json.
+	if !json.Valid(payload) {
+		return errNotOneJSONValue
+	}
+	found, err := payloadFindings(payload)
+	if err != nil {
+		return err
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	var all []string
+	for _, f := range found {
+		all = append(all, f.rules...)
+	}
+	slices.Sort(all)
+	where := quote(found[0].path)
+	if len(found) > 1 {
+		where += fmt.Sprintf(" and %d more", len(found)-1)
+	}
+	return fmt.Errorf("payload holds sensitive data (%s) at %s", strings.Join(slices.Compact(all), ", "), where)
+}
+
 // finding is sensitive data found in a payload: the rules, and the path of
 // the value that holds it, such as "payload.contact.to".
 type finding struct {
@@ -166,9 +199,11 @@ func empty(v any) bool {
 // withheld stands in for a value an error must not show.
 const withheld = "(withheld: it holds sensitive data)"
 
-// quote is s as an error message shows it: quoted, so a control character
+// Quote is s as an error message shows it: quoted, so a control character
 // cannot reach the terminal, and withheld when it holds sensitive data, so
 // the error never shows what it refuses.
+func Quote(s string) string { return quote(s) }
+
 func quote(s string) string {
 	// The one-line form too: a line break can hide a phone number.
 	if len(screenID(s)) > 0 || len(screenID(messages.OneLine(s))) > 0 ||
