@@ -34,7 +34,7 @@ The CLI will work in three steps:
 2. **Confirm.** Review the plan and confirm what should be moved.
 3. **Apply.** Make the confirmed changes, then produce a report of what was moved, what was changed to fit, and what was skipped.
 
-Commands and examples will be added with the first release.
+Use a separate `--workspace` for each migration. The first read of each side binds the workspace to its PagerDuty account host or its JSM cloud ID and organization ID. You can rotate credentials for those accounts. Each plan version writes its own `acceptance-template.yaml`.
 
 ## Installation
 

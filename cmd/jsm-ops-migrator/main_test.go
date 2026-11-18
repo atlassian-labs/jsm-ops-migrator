@@ -58,6 +58,7 @@ func TestMain(m *testing.M) {
 // operator@example.com.
 func healthyAPIs() clientsFactory {
 	account := pdfake.New(stderrT{}, "pd-canary-0123456789", pdfake.InRegion(httpx.Region(os.Getenv(pagerDutyRegionEnv))))
+	account.Answer("/users", map[string]any{"users": []map[string]string{{"html_url": "https://acme.pagerduty.com/users/P1"}}})
 	account.Answer("/abilities", map[string]any{"abilities": []string{"teams"}})
 
 	site := jsmfake.New(stderrT{}, jsmfake.Account{

@@ -120,16 +120,6 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-// writeReport prints the pre-flight report, as text or JSON.
-func writeReport(env *Env, heading string, report preflight.Report) error {
-	if env.Output == OutputJSON {
-		return writeJSON(env.Stdout, struct {
-			Preflight preflight.Report `json:"preflight"`
-		}{report})
-	}
-	return writeChecks(env.Stdout, heading, report.Checks)
-}
-
 type savedConfig struct {
 	Site            string `json:"site,omitempty"`
 	CloudID         string `json:"cloud_id,omitempty"`

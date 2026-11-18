@@ -18,6 +18,7 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/pd"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
+	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
 )
 
 // clientsFactory builds the API clients a command uses from the credentials
@@ -44,6 +45,11 @@ func apiClients(base httpx.Config) clientsFactory {
 	}
 }
 
+// steps builds the steps plan and apply run. The entity steps plug in here;
+// until they are built, the placeholders let plan and apply write every
+// review file and run record without sending anything.
+func steps(*cli.Env, credentials.Set) ([]engine.Step, error) { return engine.Placeholders(), nil }
+
 func main() { os.Exit(run(credentials.OSKeychain(), apiClients(httpx.Config{}))) }
 
 // run is main with the keychain and the API clients as parameters, so the
@@ -61,6 +67,7 @@ func run(kc credentials.Keychain, newClients clientsFactory) int {
 	return cli.Execute(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cli.Options{
 		Keychain:   kc,
 		NewClients: newClients,
+		NewSteps:   steps,
 		Interrupts: interrupts,
 		// The Ctrl+C after the command was canceled: the operator wants out.
 		ForceExit: func() { os.Exit(130) },

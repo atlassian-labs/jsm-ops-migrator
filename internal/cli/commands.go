@@ -31,7 +31,11 @@ type LoginFlags struct {
 type PlanFlags struct{ Only string }
 
 // ApplyFlags are the apply command's own flags.
-type ApplyFlags struct{}
+type ApplyFlags struct {
+	// AcceptFile is the acceptance file that confirms the plan without a
+	// prompt: its version, its hash and a reason for each warning.
+	AcceptFile string
+}
 
 // PauseFlags are the pause command's own flags.
 type PauseFlags struct{}
@@ -150,6 +154,8 @@ func (r *runner) newRootCommand() *cobra.Command {
 			return r.bodies.apply(ctx, env, r.apply)
 		}),
 	}
+	apply.Flags().StringVar(&r.apply.AcceptFile, "accept-file", "",
+		"confirm the plan with this acceptance file instead of a prompt (start from the plan's acceptance-template.yaml)")
 	pause := &cobra.Command{
 		Use:   "pause",
 		Short: "Ask a running apply to stop after the write it is making",
@@ -194,6 +200,5 @@ func envVarHelp() string {
 
 func notImplemented(command string) error { return fmt.Errorf("%s: %w", command, ErrNotImplemented) }
 
-func runApply(context.Context, *Env, ApplyFlags) error   { return notImplemented("apply") }
 func runPause(context.Context, *Env, PauseFlags) error   { return notImplemented("pause") }
 func runResume(context.Context, *Env, ResumeFlags) error { return notImplemented("resume") }

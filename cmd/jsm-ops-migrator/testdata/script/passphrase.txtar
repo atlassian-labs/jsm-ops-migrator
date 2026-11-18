@@ -28,7 +28,7 @@ env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=
 ! exec jsm-ops-migrator plan --only pagerduty
 stdout 'Secret storage .*ok .*kept in credentials.enc'
 stdout 'PagerDuty API key .*ok'
-stderr 'plan: reading PagerDuty and JSM is not implemented yet'
+stderr 'plan --only pagerduty: there is no JSM read to build on yet'
 
 env JSM_OPS_MIGRATOR_PASSPHRASE='a different passphrase'
 ! exec jsm-ops-migrator plan --only pagerduty

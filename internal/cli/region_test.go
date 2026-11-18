@@ -14,6 +14,7 @@ import (
 // setCredentialsInEnv sets.
 func pdAccount(t *testing.T, region httpx.Region) *pdfake.Fake {
 	f := pdfake.New(t, "pd-canary-0123456789", pdfake.InRegion(region))
+	f.Answer("/users", map[string]any{"users": []map[string]string{{"html_url": "https://acme.pagerduty.com/users/P1"}}})
 	f.Answer("/abilities", map[string]any{"abilities": []string{"teams"}})
 	return f
 }
@@ -36,7 +37,7 @@ func TestLoginFindsAnEUAccount(t *testing.T) {
 	}
 	// One rejected call on the US host, then the EU host; the pre-flight
 	// check reuses the answer.
-	if got := hosts(s.pd); got != pdfake.HostUS+" "+pdfake.HostEU {
+	if got := hosts(s.pd); got != pdfake.HostUS+" "+pdfake.HostEU+" "+pdfake.HostEU {
 		t.Errorf("hosts = %s", got)
 	}
 	if c := s.config(); c.PagerDutyRegion != "eu" {
@@ -63,14 +64,14 @@ func TestLoginFindsAnEUAccount(t *testing.T) {
 	}
 }
 
-func TestLoginChecksAUSAccountOnce(t *testing.T) {
+func TestLoginIdentifiesAUSAccount(t *testing.T) {
 	s := newLoginSetup(t)
 	s.pd = pdAccount(t, httpx.RegionUS)
 	setCredentialsInEnv(t, credentials.Set{}, credentials.Kinds...)
 	if r := s.run("login", "--site", "acme", "--org-id", "org-1"); r.code != ExitOK {
 		t.Fatalf("exit %d: %s", r.code, r.stderr)
 	}
-	if got := hosts(s.pd); got != pdfake.HostUS {
+	if got := hosts(s.pd); got != pdfake.HostUS+" "+pdfake.HostUS {
 		t.Errorf("hosts = %s", got)
 	}
 	if c := s.config(); c.PagerDutyRegion != "us" {

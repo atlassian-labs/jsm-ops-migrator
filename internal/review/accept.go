@@ -61,6 +61,10 @@ const maxListed = 10
 // nothing: the Hangul fillers and the blank Braille pattern.
 var blanks = map[rune]bool{0x115F: true, 0x1160: true, 0x3164: true, 0xFFA0: true, 0x2800: true}
 
+// IsReason reports whether s can be the reason a warning is accepted with,
+// so the confirmation prompt refuses what Accept would.
+func IsReason(s string) bool { return visible(s) }
+
 // visible reports whether a reason shows as something in the confirmation
 // record: a reason of spaces, control, format or blank characters is no
 // reason.
@@ -162,6 +166,15 @@ func AcceptanceTemplate(p Plan, hash string) []byte {
 	fmt.Fprintf(&b, "# Acceptance file for plan v%d. Give a reason for every warning, then run:\n", p.Version)
 	b.WriteString("#   jsm-ops-migrator apply --accept-file <this file>\n")
 	b.WriteString("# It accepts only this plan version: a new version needs a new file.\n")
+	for _, r := range p.Reads {
+		if r.Valid(r.Side) {
+			if r.Side == JSM {
+				fmt.Fprintf(&b, "# JSM cloud ID %s, organization %s\n", quote(r.ID), quote(r.OrgID))
+			} else {
+				fmt.Fprintf(&b, "# PagerDuty account %s\n", quote(r.ID))
+			}
+		}
+	}
 	fmt.Fprintf(&b, "plan_version: %d\n", p.Version)
 	fmt.Fprintf(&b, "plan_hash: %s\n", strconv.Quote(hash))
 	var warnings []messages.Message

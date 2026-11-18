@@ -38,7 +38,8 @@ grep 'pagerduty_region: us' $WORK/home/jsm-ops-migrator/config.yaml
 grep 'pd-canary-0123456789' $WORK/keychain.json
 
 # plan uses the stored credentials and asks for the JSM plan, which no API
-# reports: without it, plan waits for input (exit 4).
+# reports: without it, plan reads PagerDuty and saves the read, then waits
+# for input (exit 4).
 env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=
 env JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=
 env JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN=
@@ -46,10 +47,17 @@ env JSM_OPS_MIGRATOR_ORG_API_KEY=
 ! exec jsm-ops-migrator plan
 stdout 'JSM plan .*missing'
 stderr 'plan: missing: JSM plan'
-! exec jsm-ops-migrator plan --jsm-plan premium
+stdout 'Read PagerDuty: complete'
+! stdout 'Read JSM'
+
+# With the JSM plan stated, plan reads both sides and writes the first plan
+# version. The placeholder steps plan nothing, so it has no blocker.
+exec jsm-ops-migrator plan --jsm-plan premium
 stdout 'Secret storage .*ok .*kept in the OS keychain'
 stdout 'JSM plan .*ok .*premium'
-stderr 'plan: reading PagerDuty and JSM is not implemented yet'
+stdout 'Read JSM: complete'
+stdout 'Plan v1: 0 calls'
+exists $WORK/home/jsm-ops-migrator/artifacts/plans/v1/plan.json
 ! stdout 'canary'
 
 # --clear removes them, and plan then reports every credential as missing.
