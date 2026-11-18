@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
 )
 
 // teamStep plans two teams, one with a warning, and makes each call as told.
@@ -26,6 +28,10 @@ type teamStep struct {
 	jsmReadErr error
 	fail       map[string]error
 	calls      []string
+	// during runs inside each call; an error it returns is the call's.
+	during func(ctx context.Context, key string) error
+	// found is what a lookup finds; an item without one is unknown.
+	found map[string]engine.Lookup
 }
 
 func (s *teamStep) Name() string { return "teams" }
@@ -55,23 +61,28 @@ func (s *teamStep) Plan(_ context.Context, in engine.PlanInput) (engine.Planned,
 	return p, nil
 }
 
-func (s *teamStep) Apply(_ context.Context, it review.Item, _ engine.Results) (engine.Outcome, error) {
+func (s *teamStep) Apply(ctx context.Context, it review.Item, _ engine.Results) (engine.Outcome, error) {
 	s.calls = append(s.calls, it.Key)
+	if s.during != nil {
+		if err := s.during(ctx, it.Key); err != nil {
+			return engine.Outcome{}, err
+		}
+	}
 	if err := s.fail[it.Key]; err != nil {
 		return engine.Outcome{}, err
 	}
 	return engine.Outcome{JSM: &review.Ref{Type: "team", ID: "jsm-" + it.PagerDuty.ID}, Status: 201}, nil
 }
 
-func (s *teamStep) Lookup(context.Context, review.Item, engine.Results, *discover.Snapshot) (engine.Lookup, error) {
-	return engine.Lookup{}, nil
+func (s *teamStep) Lookup(_ context.Context, it review.Item, _ engine.Results, _ *discover.Snapshot) (engine.Lookup, error) {
+	return s.found[it.Key], nil
 }
 
 // planned logs in and plans with the team step.
 func planned(t *testing.T) (*loginSetup, *teamStep) {
 	t.Helper()
 	s := newLoginSetup(t)
-	step := &teamStep{fail: map[string]error{}}
+	step := &teamStep{fail: map[string]error{}, found: map[string]engine.Lookup{}}
 	s.steps = []engine.Step{step}
 	setCredentialsInEnv(t, credentials.Set{}, credentials.Kinds...)
 	if r := s.run("login", "--site", "acme", "--org-id", "org-1"); r.code != ExitOK {
@@ -299,6 +310,7 @@ func TestApplyExitsPartialWhenAnItemFails(t *testing.T) {
 }
 
 func TestApplyAsksInATerminal(t *testing.T) {
+	t.Setenv("ACCESSIBLE", "")
 	s, step := planned(t)
 	s.terminal = true
 	s.answers = [][]string{{"Casey left the company"}}
@@ -322,6 +334,11 @@ func TestApplyAsksInATerminal(t *testing.T) {
 	conf, _ := os.ReadFile(s.artifact("plans", "v1", review.ConfirmationFile))
 	if !bytes.Contains(conf, []byte("Casey left the company")) || !bytes.Contains(conf, []byte(review.ViaPrompt)) {
 		t.Errorf("confirmation.md:\n%s", conf)
+	}
+	// In a terminal the run draws a bar per step as it goes.
+	if !strings.Contains(r.stdout, "\r\x1b[2Kteams") || !slices.Contains(tui.LastLines(r.stdout, 20),
+		"teams                    [##############################] 2/2") {
+		t.Errorf("no progress bar:\n%q", r.stdout)
 	}
 }
 

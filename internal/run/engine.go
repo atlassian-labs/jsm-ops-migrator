@@ -28,6 +28,17 @@ type Engine struct {
 	Accounts map[review.Side]review.MigrationAccount
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// Interrupted is closed when the operator asks a run to stop after the
+	// call it is making, at the first Ctrl+C. pause asks the same of the run
+	// through pause-request.json.
+	Interrupted <-chan struct{}
+	// Progress, when set, is told about each item a run takes, once its
+	// result is committed.
+	Progress func(Progress)
+
+	// crash stops a run at one point of an item's turn as a crash would:
+	// nothing more is written. Only tests set it.
+	crash func(point crashPoint, key string) bool
 }
 
 func (e *Engine) now() time.Time {
@@ -112,10 +123,16 @@ func (e *Engine) RunOf(ctx context.Context, version int) (*RunInfo, error) {
 }
 
 func (e *Engine) runWhere(ctx context.Context, where string, args ...any) (*RunInfo, error) {
+	return queryRun(ctx, e.Store.DB(), where, args...)
+}
+
+// queryRun reads one run from what the runs table keeps in clear, so the
+// status read can use it without the data key.
+func queryRun(ctx context.Context, db *sql.DB, where string, args ...any) (*RunInfo, error) {
 	var r RunInfo
 	var state, started string
 	var ended sql.NullString
-	err := e.Store.DB().QueryRowContext(ctx,
+	err := db.QueryRowContext(ctx,
 		`SELECT id, plan_version, state, started_at, ended_at, total, written, failed, record, jsm_read FROM runs WHERE `+where, args...).
 		Scan(&r.ID, &r.PlanVersion, &state, &started, &ended, &r.Total, &r.Written, &r.Failed, &r.Record, &r.JSMRead)
 	if errors.Is(err, sql.ErrNoRows) {

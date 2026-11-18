@@ -259,16 +259,10 @@ type Info struct {
 // choice of key provider can run while another command uses the workspace. A
 // missing or uninitialized state.db gives a zero Info.
 func ReadInfo(ctx context.Context, ws *Workspace) (Info, error) {
-	path := ws.StatePath()
-	if strings.ContainsRune(path, '?') {
-		return Info{}, fmt.Errorf("the workspace path must not contain '?': %s", path)
-	}
-	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+	db, err := OpenReadOnly(ws)
+	if errors.Is(err, ErrStateNotFound) {
 		return Info{}, nil
-	} else if err != nil {
-		return Info{}, err
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=query_only(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return Info{}, err
 	}
@@ -291,6 +285,24 @@ func ReadInfo(ctx context.Context, ws *Workspace) (Info, error) {
 		return Info{}, fmt.Errorf("reading state.db: %w", err)
 	}
 	return info, nil
+}
+
+// OpenReadOnly opens state.db to read what it keeps in clear, without the
+// data key or the workspace lock, and changes nothing, so the menu and pause
+// can read where the workspace stands while another command uses it. It
+// returns ErrStateNotFound when state.db is missing. The schema is whatever
+// state.db has: the caller checks the tables it reads.
+func OpenReadOnly(ws *Workspace) (*sql.DB, error) {
+	path := ws.StatePath()
+	if strings.ContainsRune(path, '?') {
+		return nil, fmt.Errorf("the workspace path must not contain '?': %s", path)
+	}
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil, ErrStateNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	return sql.Open("sqlite", path+"?_pragma=query_only(1)&_pragma=busy_timeout(5000)")
 }
 
 // KeyProviderID is the ID of the provider that protects this workspace's
