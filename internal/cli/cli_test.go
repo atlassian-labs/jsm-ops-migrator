@@ -115,13 +115,15 @@ func TestUsageErrors(t *testing.T) {
 	}
 }
 
-// stubBodies replace login and plan with stubs, for tests about the command
+// stubBodies replace every command with a stub, for tests about the command
 // machinery rather than what the commands do.
 func stubBodies() bodies {
 	b := defaultBodies()
 	b.login = func(context.Context, *Env, LoginFlags) error { return notImplemented("login") }
 	b.plan = func(context.Context, *Env, PlanFlags) error { return notImplemented("plan") }
 	b.apply = func(context.Context, *Env, ApplyFlags) error { return notImplemented("apply") }
+	b.pause = func(context.Context, *Env, PauseFlags) error { return notImplemented("pause") }
+	b.resume = func(context.Context, *Env, ResumeFlags) error { return notImplemented("resume") }
 	return b
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
+	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/tui"
 )
@@ -181,6 +182,26 @@ func (r *runner) menuState(ctx context.Context) MenuState {
 		r.opts.DescribeWorkspace(ctx, ws, cfg, &s)
 	}
 	return s
+}
+
+// describeWorkspace adds the latest plan version and run to the menu's
+// status, from what state.db keeps in clear, so it needs neither the data
+// key nor the lock: the menu shows where a run in another window stands, in
+// a workspace whose key is behind a passphrase too.
+func describeWorkspace(ctx context.Context, ws *store.Workspace, _ Config, s *MenuState) {
+	st, err := engine.ReadStatus(ctx, ws)
+	if err != nil {
+		s.Problem = credentials.RedactText(err.Error())
+		return
+	}
+	if p := st.Plan; p != nil {
+		s.Plan = &PlanStatus{Version: p.Version, Changes: p.Calls, Blockers: p.Blockers, Warnings: p.Warnings,
+			Dir: filepath.Join(ws.ArtifactsDir(), p.Dir)}
+	}
+	if r := st.Run; r != nil {
+		s.Run = &RunStatus{PlanVersion: r.PlanVersion, State: RunState(r.State), Written: r.Written, Total: r.Total,
+			Failed: r.Failed, Record: filepath.Join(ws.ArtifactsDir(), r.Record)}
+	}
 }
 
 // describeMenu turns the state into the lines above the menu and the action

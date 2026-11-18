@@ -199,6 +199,3 @@ func envVarHelp() string {
 }
 
 func notImplemented(command string) error { return fmt.Errorf("%s: %w", command, ErrNotImplemented) }
-
-func runPause(context.Context, *Env, PauseFlags) error   { return notImplemented("pause") }
-func runResume(context.Context, *Env, ResumeFlags) error { return notImplemented("resume") }
