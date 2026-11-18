@@ -1,6 +1,9 @@
 package credentials
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // secretKeys are field, header and parameter names whose values are
 // credentials. http_cal_url and web_cal_url are PagerDuty calendar feed URLs,
@@ -43,14 +46,41 @@ var personalKeys = map[string]bool{
 	"device_id":    true,
 }
 
+// normalizeKey writes a name in snake_case, so accessToken, access-token and
+// ACCESS_TOKEN all match access_token. camelCase is split into words, the
+// way JSON APIs such as JSM's name their fields: phoneNumber, webCalUrl,
+// APIKey.
 func normalizeKey(key string) string {
+	runes := []rune(strings.TrimSpace(key))
+	var b strings.Builder
+	for i, c := range runes {
+		if unicode.IsUpper(c) && i > 0 {
+			prev := runes[i-1]
+			nextLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
+				b.WriteByte('_')
+			}
+		}
+		b.WriteRune(unicode.ToLower(c))
+	}
+	return strings.ReplaceAll(b.String(), "-", "_")
+}
+
+// flatKey writes a name in lower case with no split. A name matches if
+// either form does: splitting camelCase also splits one listed word written
+// with a capital inside it, so passPhrase, PassWord and APIkey match only in
+// this form.
+func flatKey(key string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "-", "_")
 }
 
 // IsSecretKey reports whether a field, header or parameter name holds a
 // credential. The match ignores case and treats '-' and '_' alike.
 func IsSecretKey(key string) bool {
-	k := normalizeKey(key)
+	return isSecretName(normalizeKey(key)) || isSecretName(flatKey(key))
+}
+
+func isSecretName(k string) bool {
 	if secretKeys[k] {
 		return true
 	}
@@ -65,5 +95,5 @@ func IsSecretKey(key string) bool {
 // IsSensitiveKey reports whether a name holds a credential or personal contact
 // data. Logs and review files redact the values of every such key.
 func IsSensitiveKey(key string) bool {
-	return IsSecretKey(key) || personalKeys[normalizeKey(key)]
+	return IsSecretKey(key) || personalKeys[normalizeKey(key)] || personalKeys[flatKey(key)]
 }

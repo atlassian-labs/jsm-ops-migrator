@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit"
 )
@@ -367,21 +368,28 @@ func TestInterruptThroughSignalsAndRequest(t *testing.T) {
 	}
 }
 
+// codedError has an ExitCode method of its own, as an *exec.ExitError from a
+// keychain helper does. Its code must not become the CLI's.
 type codedError struct{ code int }
 
 func (e codedError) Error() string { return fmt.Sprintf("coded %d", e.code) }
 func (e codedError) ExitCode() int { return e.code }
 
-func TestExitCoder(t *testing.T) {
+func TestExitCodes(t *testing.T) {
 	inTempDir(t)
 	for _, tc := range []struct {
 		err  error
 		want int
 	}{
-		{codedError{6}, 6},
-		{fmt.Errorf("wrapped: %w", codedError{3}), 3},
-		{codedError{0}, ExitError},
+		{codedError{5}, ExitError},
+		{fmt.Errorf("opening the workspace: keychain unavailable: %w", codedError{6}), ExitError},
 		{errors.New("plain"), ExitError},
+		{messages.Blocked(errors.New("plan: 1 blocker")), messages.ExitBlocked},
+		{fmt.Errorf("plan: %w", messages.AwaitingInput(errors.New("missing"))), ExitAwaitingInput},
+		{messages.ValidationFailed(errors.New("plan.json changed")), messages.ExitValidationFailed},
+		{fmt.Errorf("apply: %w", messages.PartiallyComplete(errors.New("1 failed"))), messages.ExitPartial},
+		{errors.Join(errors.New("a"), messages.Blocked(errors.New("b"))), messages.ExitBlocked},
+		{messages.Blocked(codedError{6}), messages.ExitBlocked},
 	} {
 		b := defaultBodies()
 		b.plan = func(context.Context, *Env, PlanFlags) error { return tc.err }

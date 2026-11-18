@@ -1,0 +1,29 @@
+# Plan v2
+
+Created 2026-11-12 10:00:00 UTC.
+
+Built from these reads:
+
+- PagerDuty, read 2026-11-12 09:58:00 UTC: complete
+- JSM, read 2026-11-12 09:59:30 UTC: incomplete
+
+`apply` makes 2 calls. The plan raises 1 blocker, 2 warnings, 1 manual task, 1 information: see `risk-queue.md`.
+
+## By step
+
+| Step | create | update | map | skip | manual |
+|---|---:|---:|---:|---:|---:|
+| users | 1 | 0 | 1 | 1 | 0 |
+| teams | 1 | 0 | 0 | 0 | 1 |
+
+## Items in the order apply takes them
+
+`create` and `update` make a call. `map` records the link to an object that is already in JSM, and `skip` and `manual` are reported: none of these three makes a call.
+
+1. `users/PU1` create: Invite Avery Example (avery@example.com)
+2. `users/PU2` map (JSM `account 712020:0000aaaa`): Blake Example is already in the organization
+3. `users/PU3` skip: Casey Example is a stakeholder
+4. `teams/PT1` create: Create team Platform
+   After `users/PU1`, `users/PU2`.
+5. `teams/PT1-ops` manual: Turn on Operations for Platform by hand
+   After `teams/PT1`.

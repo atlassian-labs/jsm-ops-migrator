@@ -1,0 +1,12 @@
+# Acceptance file for plan v2. Give a reason for every warning, then run:
+#   jsm-ops-migrator apply --accept-file <this file>
+# It accepts only this plan version: a new version needs a new file.
+plan_version: 2
+plan_hash: "sha256:784992a95163c6071a0e07883bfd0b053acc3d5a2f796c6f0712b601463bda19"
+warnings:
+  # Casey Example is not migrated, so they are not added to Platform.
+  - id: "teams/PT1/member_dropped"
+    reason: ""
+  # Casey Example is a PagerDuty stakeholder and is left out.
+  - id: "users/PU3/stakeholder"
+    reason: ""
