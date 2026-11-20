@@ -491,7 +491,12 @@ func TestWritePlanVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(ws.ArtifactsDir(), review.PlanDir(2))
-	for _, name := range []string{review.PlanFile, review.PlanMarkdownFile, review.DiffFile, review.RiskQueueFile, review.AcceptanceTemplateFile} {
+	// plan checks a version's folder for PlanFiles before it keeps the
+	// version, so they must be exactly what is written.
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != len(review.PlanFiles) {
+		t.Errorf("v2 holds %d files, want the %d PlanFiles: %v", len(entries), len(review.PlanFiles), err)
+	}
+	for _, name := range review.PlanFiles {
 		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Errorf("%s: %v", name, err)

@@ -113,14 +113,19 @@ func (m Message) Redacted() Message {
 // the redactor does not see a phone number split by a line break that
 // OneLine would then join, and it is redacted until nothing more changes,
 // because removing one value can make the text next to it match a rule.
-func Clean(s string) string {
+func Clean(s string) string { return CleanWith(nil, s) }
+
+// CleanWith is Clean with r, which also removes the secrets it knows. Text
+// the operator typed needs it: a credential pasted bare has no label for a
+// pattern to find.
+func CleanWith(r *credentials.Redactor, s string) string {
 	s = OneLine(s)
 	for range maxRedactPasses {
-		r := credentials.RedactText(s)
-		if r == s {
+		c := r.String(s)
+		if c == s {
 			break
 		}
-		s = r
+		s = c
 	}
 	return s
 }
