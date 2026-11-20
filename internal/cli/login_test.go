@@ -710,3 +710,27 @@ func TestNormalizeSite(t *testing.T) {
 		}
 	}
 }
+
+// Third review: once /abilities worked, login took any error of the users
+// list that identifies the PagerDuty account as a check that could not run,
+// so when PagerDuty refused the list it left the key out and exited 0.
+func TestLoginFailsWhenPagerDutyRefusesTheUserList(t *testing.T) {
+	s := newLoginSetup(t)
+	setCredentialsInEnv(t, credentials.Set{}, credentials.Kinds...)
+	s.apis.AccountHostErr = fmt.Errorf("GET /users: 403: %w", httperr.ErrForbidden)
+	r := s.run("login", "--site", "acme", "--org-id", "org-1", "--output", "json")
+	var res struct {
+		Rejected  []credentials.Kind `json:"rejected"`
+		Unchecked []credentials.Kind `json:"unchecked"`
+	}
+	if err := decodeOne(r.stdout, &res); err != nil || r.code != ExitError || !strings.Contains(r.stderr, "PagerDuty API key") {
+		t.Fatalf("exit %d, %v, stderr %q\n%s", r.code, err, r.stderr, r.stdout)
+	}
+	if !slices.Equal(res.Rejected, []credentials.Kind{credentials.PagerDutyKey}) || slices.Contains(res.Unchecked, credentials.PagerDutyKey) {
+		t.Errorf("rejected %v, unchecked %v", res.Rejected, res.Unchecked)
+	}
+	if s.stored().Has(credentials.PagerDutyKey) {
+		t.Error("a key PagerDuty refused the users list to was stored")
+	}
+	noLeaks(t, s.dir, r)
+}

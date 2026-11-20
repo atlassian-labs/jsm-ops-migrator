@@ -159,12 +159,15 @@ func (e *Engine) Plan(ctx context.Context, pagerDuty, jsm *discover.Snapshot) (P
 // run again, so a plan that still makes calls after it, such as every call
 // of a run that failed for a permission fixed since, is a new version. So is
 // any plan while a folder newer than the latest version is on disk: apply
-// refuses until a version is newer than it.
+// refuses until a version is newer than it. So is one whose folder lacks a
+// review file: the operator reviews them, apply points at the acceptance
+// template, and a version's folder is never written into again.
 func (e *Engine) unchanged(ctx context.Context, latest *PlanVersion, p review.Plan, content string, next int) (bool, error) {
 	if latest == nil || latest.ContentHash != content || next != latest.Version+1 {
 		return false, nil
 	}
-	data, err := os.ReadFile(filepath.Join(e.Workspace.ArtifactsDir(), latest.Dir, review.PlanFile))
+	dir := filepath.Join(e.Workspace.ArtifactsDir(), latest.Dir)
+	data, err := os.ReadFile(filepath.Join(dir, review.PlanFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -173,6 +176,13 @@ func (e *Engine) unchanged(ctx context.Context, latest *PlanVersion, p review.Pl
 	}
 	if review.Hash(data) != latest.Hash {
 		return false, nil
+	}
+	for _, f := range review.PlanFiles {
+		if _, err := os.Stat(filepath.Join(dir, f)); errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
 	}
 	if review.Summarize(p).Calls == 0 {
 		return true, nil

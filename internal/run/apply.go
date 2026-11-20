@@ -135,8 +135,13 @@ func (e *Engine) CheckAccounts(v *PlanVersion) error {
 // RunResult is what Apply did.
 type RunResult struct {
 	Info RunInfo
-	// Record is the run record as it was last written.
+	// Record is the run record, rebuilt from the journal, which has every
+	// result, so it says what the run did even when Apply fails once the run
+	// exists. It is the zero Run when the journal could not be read either.
 	Record review.Run
+	// RecordWritten means Record's files are on disk. When it is false, the
+	// files there, if any, are older than Record.
+	RecordWritten bool
 }
 
 // Apply confirms v with c and runs it: every item in the plan's order, each
@@ -147,8 +152,9 @@ type RunResult struct {
 // are taken as planned, each step deciding from the results of the items it
 // depends on. So a run whose items did not all end done is a result, not an
 // error. Apply returns an error only when the run cannot go on: state.db or
-// the record cannot be written. When ctx ends, the run stops after the call
-// in flight and is marked interrupted.
+// the record cannot be written. Once the run exists, its result says what it
+// did even then. When ctx ends, the run stops after the call in flight and
+// is marked interrupted.
 func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmation) (RunResult, error) {
 	if err := e.CheckApply(ctx, v); err != nil {
 		return RunResult{}, err
@@ -159,6 +165,9 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 	if err := c.Check(v.Plan, v.Hash); err != nil {
 		return RunResult{}, messages.ValidationFailed(err)
 	}
+	// What the operator typed is cleaned once, and the same confirmation is
+	// sealed and written, so neither keeps what the other leaves out.
+	c = e.cleaned(c)
 	jsm, err := e.lookupRead(ctx, v)
 	if err != nil {
 		return RunResult{}, err
@@ -173,39 +182,56 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 		return RunResult{}, err
 	}
 	// From here on the run exists: a failure leaves it unfinished, for
-	// resume, which rebuilds what is missing from state.db.
+	// resume, which rebuilds what is missing from state.db. What the run did
+	// so far is in its journal, so a failure still reports it.
+	stopped := func(err error) (RunResult, error) {
+		return RunResult{Info: info, Record: e.journalRecord(ctx, info, v.Plan)}, err
+	}
 	if err := review.WriteConfirmation(e.Workspace, c, v.Plan); err != nil {
-		return RunResult{Info: info}, err
+		return stopped(err)
 	}
 	// A pause request left by an apply that has ended is not for this one.
 	if err := e.Workspace.RemoveFile(PauseRequestFile); err != nil {
-		return RunResult{Info: info}, err
+		return stopped(err)
 	}
 	active, err := json.Marshal(ActiveRun{RunID: info.ID, PlanVersion: info.PlanVersion, StartedAt: info.StartedAt})
 	if err != nil {
-		return RunResult{Info: info}, err
+		return stopped(err)
 	}
 	if err := e.Workspace.WriteFileAtomic(ActiveRunFile, active); err != nil {
-		return RunResult{Info: info}, err
+		return stopped(err)
 	}
 	x := &executor{e: e, info: &info, plan: v.Plan, jsm: jsm, results: Results{}}
 	record, err := x.run(ctx)
 	if err != nil {
-		return RunResult{Info: info}, err
+		return stopped(err)
 	}
+	res := RunResult{Info: info, Record: record, RecordWritten: true}
 	if err := e.Workspace.RemoveFile(ActiveRunFile); err != nil {
-		return RunResult{Info: info, Record: record}, err
+		return res, err
 	}
-	return RunResult{Info: info, Record: record}, nil
+	return res, nil
+}
+
+// journalRecord is the run record rebuilt from the journal, for a run that
+// failed before its record was written, or the zero Run when the journal
+// cannot be read: then nothing is known about its items.
+func (e *Engine) journalRecord(ctx context.Context, info RunInfo, p review.Plan) review.Run {
+	r, err := e.record(context.WithoutCancel(ctx), info, p)
+	if err != nil {
+		return review.Run{}
+	}
+	return r
 }
 
 // lookupRead is the JSM read a run's lookups compare with: the latest
-// complete one, which is the plan's own or one taken since by a plan that
-// gave the same plan. Lookup counts an object that matches an item but is
-// not in this read as made by the run, so the newest read before the run
-// leaves the fewest objects the customer made to be taken for ours.
+// complete one these steps made, which is the plan's own or one taken since
+// by a plan that gave the same plan. Lookup counts an object that matches an
+// item but is not in this read as made by the run, so the newest read before
+// the run leaves the fewest objects the customer made to be taken for ours.
+// A read of other steps holds nothing of the steps that did not read.
 func (e *Engine) lookupRead(ctx context.Context, v *PlanVersion) (*discover.Snapshot, error) {
-	latest, err := discover.LatestComplete(ctx, e.Store, review.JSM)
+	latest, err := discover.LatestComplete(ctx, e.Store, review.JSM, e.readers())
 	if err != nil {
 		return nil, err
 	}
@@ -215,15 +241,20 @@ func (e *Engine) lookupRead(ctx context.Context, v *PlanVersion) (*discover.Snap
 	return discover.Open(ctx, e.Store, v.JSMRead)
 }
 
+// cleaned is c with each reason as every report writes it, also without the
+// invocation's credentials, so a phone number or a token in a reason is never
+// stored, sealed or not, nor written to confirmation.md.
+func (e *Engine) cleaned(c review.Confirmation) review.Confirmation {
+	c.Accepted = slices.Clone(c.Accepted)
+	for i := range c.Accepted {
+		c.Accepted[i].Reason = messages.CleanWith(e.Redactor, c.Accepted[i].Reason)
+	}
+	return c
+}
+
 // confirm records the confirmation and the run it starts in one
 // transaction, so a run never exists without the confirmation it ran under.
 func (e *Engine) confirm(ctx context.Context, info RunInfo, c review.Confirmation) error {
-	// What the operator typed is kept as confirmation.md shows it, so a
-	// phone number in a reason is never stored, sealed or not.
-	c.Accepted = slices.Clone(c.Accepted)
-	for i := range c.Accepted {
-		c.Accepted[i].Reason = messages.Clean(c.Accepted[i].Reason)
-	}
 	data, err := json.Marshal(c)
 	if err != nil {
 		return err
@@ -394,8 +425,11 @@ func (x *executor) take(ctx, db context.Context, it review.Item) (res Result, in
 		}
 	case callErr == nil:
 		row.state = review.Done
-		if out.JSM != nil {
+		switch {
+		case out.JSM != nil:
 			row.jsm = out.JSM
+		case it.Action == review.Create && it.PagerDuty != nil:
+			x.unnamed(ctx, step, it, deps, &row)
 		}
 	default:
 		x.failed(ctx, step, it, deps, callErr, &row)
@@ -411,10 +445,41 @@ func (x *executor) take(ctx, db context.Context, it review.Item) (res Result, in
 	return res, false, nil
 }
 
+// lookUp asks the step what the item's call made, once, at once: found is
+// the object. Anything else is nil, and the call is never sent again within
+// the run, because a JSM write can take a moment to show, so a lookup right
+// after the call can miss what it made.
+func (x *executor) lookUp(ctx context.Context, step Step, it review.Item, deps Results) (*review.Ref, error) {
+	found, err := step.Lookup(ctx, it, deps, x.jsm)
+	if err != nil || found.Outcome != LookupFound {
+		return nil, err
+	}
+	return found.JSM, nil
+}
+
+// unnamed settles a create that succeeded without naming the JSM object it
+// made. Recorded done, it would map nothing, and the next plan would create
+// the object again; so it is looked up, as an unknown outcome is, and stays
+// unknown, which keeps the run unfinished, until something names the object.
+func (x *executor) unnamed(ctx context.Context, step Step, it review.Item, deps Results, row *journalRow) {
+	found, lookErr := x.lookUp(ctx, step, it, deps)
+	if found != nil {
+		row.jsm = found
+		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "object_found",
+			Text: "The create call gave no JSM object, but a lookup found the one it made."})
+		return
+	}
+	row.state = review.Unknown
+	text := "The create call was made, but the step gave no JSM object for it, so what it made cannot be mapped. " +
+		"resume looks it up; until then, check it in JSM."
+	if lookErr != nil {
+		text += fmt.Sprintf(" The lookup failed: %v.", lookErr)
+	}
+	row.msgs = append(row.msgs, messages.Message{Class: messages.ManualTask, Code: "object_unidentified", Text: text})
+}
+
 // failed records a call that returned an error. An unknown outcome is looked
-// up once, at once: found means done. Anything else leaves it unknown, and
-// it is never sent again within the run, because a JSM write can take a
-// moment to show, so a lookup right after the call can miss what it made.
+// up: found means done, and anything else leaves it unknown.
 func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps Results, callErr error, row *journalRow) {
 	class := messages.Classify(callErr, messages.Write)
 	if class != messages.ManualTask {
@@ -423,9 +488,9 @@ func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps R
 			Text: fmt.Sprintf("The %s call failed: %v", it.Action, callErr)})
 		return
 	}
-	found, lookErr := step.Lookup(ctx, it, deps, x.jsm)
-	if lookErr == nil && found.Outcome == LookupFound && found.JSM != nil {
-		row.state, row.jsm = review.Done, found.JSM
+	found, lookErr := x.lookUp(ctx, step, it, deps)
+	if found != nil {
+		row.state, row.jsm = review.Done, found
 		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "outcome_found",
 			Text: fmt.Sprintf("JSM did not answer the %s call (%v), but a lookup found that it took effect.", it.Action, callErr)})
 		return

@@ -26,6 +26,9 @@ const (
 	MappingFile            = "mapping.csv"
 )
 
+// PlanFiles are the review files WritePlanVersion writes for each version.
+var PlanFiles = []string{PlanFile, PlanMarkdownFile, DiffFile, RiskQueueFile, AcceptanceTemplateFile}
+
 // PlanDir is a plan version's folder, relative to artifacts/.
 func PlanDir(version int) string { return filepath.Join("plans", fmt.Sprintf("v%d", version)) }
 

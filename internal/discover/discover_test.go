@@ -12,6 +12,7 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit"
 )
 
@@ -102,14 +103,14 @@ func TestAReadCutShortIsNeverUsed(t *testing.T) {
 	if _, err := discover.Read(cut, st, review.JSM, jsmAccount, []discover.Reader{stopped}, now); !errors.Is(err, context.Canceled) {
 		t.Fatalf("a canceled read: %v", err)
 	}
-	latest, err := discover.Latest(ctx, st, review.JSM)
+	latest, err := discover.Latest(ctx, st, review.JSM, []discover.Reader{ok})
 	if err != nil || latest == nil || latest.ID() != first.ID() {
 		t.Fatalf("Latest = %v, %v; want the read before", latest, err)
 	}
 	if _, err := discover.Open(ctx, st, first.ID()+1); !errors.Is(err, discover.ErrNoRead) {
 		t.Errorf("opening the unfinished read: %v", err)
 	}
-	if none, err := discover.Latest(ctx, st, review.PagerDuty); none != nil || err != nil {
+	if none, err := discover.Latest(ctx, st, review.PagerDuty, []discover.Reader{ok}); none != nil || err != nil {
 		t.Errorf("a side never read: %v, %v", none, err)
 	}
 }
@@ -157,5 +158,63 @@ func TestReadProblemsAreCleaned(t *testing.T) {
 	again, err := discover.Open(context.Background(), st, s.ID())
 	if err != nil || strings.Contains(again.Problems()[0].Text, "4155550123") {
 		t.Errorf("the sealed problem keeps the phone number: %v %+v", err, again.Problems())
+	}
+}
+
+// versioned is a reader whose part of a read is in format v.
+type versioned struct {
+	reader
+	v int
+}
+
+func (r versioned) ReadVersion() int { return r.v }
+
+// Third review: a read was reused by side alone, so a build with a new step
+// took a read made without it as one with none of that step's objects. A
+// read is reused only by the readers that made it, in the same versions, in
+// any order; one made before reads recorded their readers never is.
+func TestAReadIsReusedOnlyByItsReaders(t *testing.T) {
+	st := testkit.NewStore(t)
+	ctx := context.Background()
+	nothing := func(context.Context, *discover.Writer) error { return nil }
+	teams, users := reader{"teams", nothing}, reader{"users", nothing}
+	first, err := discover.Read(ctx, st, review.JSM, jsmAccount, []discover.Reader{teams}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, err := discover.Read(ctx, st, review.JSM, jsmAccount, []discover.Reader{users, teams}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		readers []discover.Reader
+		want    int64
+	}{
+		"the same readers in another order": {[]discover.Reader{teams, users}, both.ID()},
+		"the readers of the first read":     {[]discover.Reader{teams}, first.ID()},
+		"a reader that never read":          {[]discover.Reader{users}, 0},
+		"a newer version of a reader":       {[]discover.Reader{versioned{teams, 1}}, 0},
+	} {
+		for _, latest := range []func(context.Context, *store.Store, review.Side, []discover.Reader) (*discover.Snapshot, error){
+			discover.Latest, discover.LatestComplete,
+		} {
+			s, err := latest(ctx, st, review.JSM, c.readers)
+			var got int64
+			if s != nil {
+				got = s.ID()
+			}
+			if err != nil || got != c.want {
+				t.Errorf("%s: read %d, %v; want %d", name, got, err, c.want)
+			}
+		}
+	}
+	if got := discover.Coverage([]discover.Reader{users, versioned{teams, 2}}); got != "teams@2,users@0" {
+		t.Errorf("Coverage = %q", got)
+	}
+	if _, err := st.DB().ExecContext(ctx, `UPDATE snapshot_reads SET readers = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := discover.Latest(ctx, st, review.JSM, []discover.Reader{teams}); s != nil || err != nil {
+		t.Errorf("a read without its readers was reused: %v, %v", s, err)
 	}
 }
