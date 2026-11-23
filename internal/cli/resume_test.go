@@ -3,12 +3,18 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit"
 )
 
@@ -144,7 +150,8 @@ func TestACtrlCBeforeTheRunStopsApply(t *testing.T) {
 }
 
 // The second Ctrl+C cancels the call in flight, which resume looks up
-// before it sends anything: unknown waits, and not found is sent again.
+// before it sends anything: unknown waits, and not found is sent again once
+// the call is old enough for the lookup to be believed.
 func TestTheSecondCtrlCLeavesTheCallForResume(t *testing.T) {
 	s, step := planned(t)
 	step.during = func(ctx context.Context, key string) error {
@@ -168,6 +175,15 @@ func TestTheSecondCtrlCLeavesTheCallForResume(t *testing.T) {
 		t.Errorf("calls %v: the unknown call is never sent again", step.calls)
 	}
 	step.found["teams/PT1"] = engine.Lookup{Outcome: engine.LookupNotFound}
+	r = s.run("resume", "--jsm-plan", "premium")
+	if r.code != messages.ExitPartial || !strings.Contains(r.stderr, "a lookup this soon after a call can miss what it made") ||
+		!strings.Contains(r.stderr, "Resume it after") {
+		t.Fatalf("resume right after the call: exit %d, stderr %q\n%s", r.code, r.stderr, r.stdout)
+	}
+	if strings.Join(step.calls, " ") != "teams/PT1 teams/PT2" {
+		t.Errorf("calls %v: not found right after the call is not believed", step.calls)
+	}
+	s.wait(time.Hour)
 	if r := s.run("resume", "--jsm-plan", "premium"); r.code != ExitOK {
 		t.Fatalf("resume after not found: exit %d, stderr %q\n%s", r.code, r.stderr, r.stdout)
 	}
@@ -187,6 +203,85 @@ func TestResumeNeedsTheAccountThatConfirmed(t *testing.T) {
 	}
 	if strings.Join(step.calls, " ") != "teams/PT1" {
 		t.Errorf("calls %v", step.calls)
+	}
+	for _, f := range []string{engine.ActiveRunFile, engine.PauseRequestFile} {
+		if _, err := os.Stat(filepath.Join(s.dir, f)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s after a resume that stopped at its checks: %v", f, err)
+		}
+	}
+}
+
+// pause from another window while resume runs its checks is accepted, and
+// the run stops before its first item, whether it was paused or crashed. A
+// request left from before resume started, which a crash or a pause as the
+// run stopped leaves, is not for it, and resume goes on.
+func TestPauseDuringResumesChecks(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// left is what is in the workspace when resume starts.
+		left []string
+		// pause is whether pause runs during the checks.
+		pause bool
+	}{
+		{"after a pause", nil, true},
+		{"after a crash", []string{engine.ActiveRunFile, engine.PauseRequestFile}, true},
+		{"a request from before", []string{engine.PauseRequestFile}, false},
+		{"a crash's request from before", []string{engine.ActiveRunFile, engine.PauseRequestFile}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, step := paused(t)
+			ws, err := store.OpenWorkspace(s.dir, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := engine.ReadStatus(context.Background(), ws)
+			if err != nil || status.Run == nil {
+				t.Fatalf("ReadStatus = %+v, %v", status, err)
+			}
+			run := status.Run
+			for _, f := range c.left {
+				var data []byte
+				if f == engine.ActiveRunFile {
+					data, err = json.Marshal(engine.ActiveRun{RunID: run.ID, PlanVersion: run.PlanVersion, StartedAt: run.StartedAt})
+				} else {
+					data, err = json.Marshal(engine.PauseRequest{RunID: run.ID, RequestedAt: loginNow})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := ws.WriteFileAtomic(f, data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.pause {
+				s.onSteps = func() {
+					r := s.run("pause")
+					if r.code != ExitOK || !strings.Contains(r.stdout, "Asked run "+run.ID) {
+						t.Errorf("pause during resume's checks: exit %d, stderr %q\n%s", r.code, r.stderr, r.stdout)
+					}
+				}
+			}
+			r := s.run("resume", "--jsm-plan", "premium")
+			s.onSteps = nil
+			for _, f := range []string{engine.ActiveRunFile, engine.PauseRequestFile} {
+				if _, err := os.Stat(filepath.Join(s.dir, f)); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("%s after resume: %v", f, err)
+				}
+			}
+			if !c.pause {
+				if r.code != ExitOK || strings.Join(step.calls, " ") != "teams/PT1 teams/PT2" {
+					t.Fatalf("resume: exit %d, calls %v, stderr %q", r.code, step.calls, r.stderr)
+				}
+				return
+			}
+			if r.code != messages.ExitPartial || !strings.Contains(r.stderr, "was paused after 1 of 2 items") ||
+				strings.Join(step.calls, " ") != "teams/PT1" {
+				t.Fatalf("resume with pause during its checks: exit %d, calls %v, stderr %q", r.code, step.calls, r.stderr)
+			}
+			if r := s.run("resume", "--jsm-plan", "premium"); r.code != ExitOK || strings.Join(step.calls, " ") != "teams/PT1 teams/PT2" {
+				t.Errorf("the next resume: exit %d, calls %v, stderr %q", r.code, step.calls, r.stderr)
+			}
+		})
 	}
 }
 

@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
@@ -194,8 +196,8 @@ func TestAPauseRequestForAnotherRunIsIgnored(t *testing.T) {
 }
 
 // After a pause, resume takes only what is left. An item whose call is
-// unknown is looked up first: found is done, not found is sent again, and
-// anything else stays unknown and is never sent.
+// unknown is looked up first: found is done, not found once the call is old
+// enough is sent again, and anything else stays unknown and is never sent.
 func TestResumeLooksUpBeforeItSendsAgain(t *testing.T) {
 	w := newWorkspace(t)
 	r := &remote{objects: map[string]int{}}
@@ -216,6 +218,7 @@ func TestResumeLooksUpBeforeItSendsAgain(t *testing.T) {
 	teams.found["teams/T1"] = run.Lookup{Outcome: run.LookupNotFound}
 	teams.found["teams/T2"] = run.Lookup{Outcome: run.LookupFound, JSM: &review.Ref{Type: "team", ID: "jsm-found"}}
 	teams.applied, teams.looked = nil, nil
+	w.wait(run.ResendAfter)
 	res = w.resume(e)
 	if !slices.Equal(teams.looked, []string{"teams/T1", "teams/T2", "teams/T3"}) {
 		t.Errorf("lookups %v", teams.looked)
@@ -282,39 +285,241 @@ func TestResumeLooksUpBeforeItSendsAgain(t *testing.T) {
 	}
 }
 
-func TestResumeHonorsPauseRequestedDuringCrashRecovery(t *testing.T) {
+// A lookup soon after a call can miss what the call made, so resume believes
+// not found only once the attempt is ResendAfter old. A resume sooner sends
+// nothing, stops at the item, so the items that depend on it are taken by
+// the resume that settles it instead of being declined, and says when to
+// resume.
+func TestResumeBelievesNotFoundOnlyOnceTheCallIsOldEnough(t *testing.T) {
 	ctx := context.Background()
-	w, e, remote := crashSetup(t)
-	v := w.mustLatest(e)
-	e.CrashAt(func(at run.CrashPoint, key string) bool {
-		return at == run.CrashPoints[0] && key == "teams/T1"
-	})
-	if _, err := e.Apply(ctx, v, confirmation(v)); !errors.Is(err, run.ErrCrashed) {
-		t.Fatalf("Apply = %v, want a crash before the first call", err)
+	w, e, r := crashSetup(t)
+	// A crash after T1's sending row, before its call: a lookup finds nothing.
+	e.CrashAt(func(at run.CrashPoint, k string) bool { return at == run.CrashPoints[1] && k == "teams/T1" })
+	if _, err := e.Apply(ctx, w.mustLatest(e), confirmation(w.mustLatest(e))); !errors.Is(err, run.ErrCrashed) {
+		t.Fatalf("Apply = %v, want the crash", err)
 	}
-	w.reopen() // Resume holds the lock while it runs its preflight checks.
-	other, err := store.OpenWorkspace(w.ws.Dir(), false)
+	w.reopen()
+	teams := e.Steps[0].(*fakeStep)
+	e = w.engine(teams)
+	for _, after := range []time.Duration{0, time.Minute, run.ResendAfter - time.Second} {
+		w.clock = now.Add(after)
+		teams.applied, teams.looked = nil, nil
+		res := w.resume(e)
+		want := map[string]review.EntryState{"teams/T1": review.Unknown, "teams/T1-ops": review.Pending,
+			"teams/T2": review.Pending, "teams/T3": review.Pending}
+		if got := states(res.Record); res.Info.State != review.Interrupted || !maps(got, want) {
+			t.Fatalf("%s after the call: run %s, states %v; want interrupted and %v", after, res.Info.State, got, want)
+		}
+		if len(teams.applied) != 0 || !slices.Equal(teams.looked, []string{"teams/T1"}) {
+			t.Errorf("%s after the call: calls %v, lookups %v", after, teams.applied, teams.looked)
+		}
+		en := res.Record.Entries[slices.IndexFunc(res.Record.Entries, func(en review.Entry) bool { return en.Key == "teams/T1" })]
+		if len(en.Messages) != 1 || en.Messages[0].Code != "lookup_too_soon" || en.Messages[0].Class != messages.ManualTask ||
+			!strings.Contains(en.Messages[0].Text, "sent at 2026-11-17T09:00:00Z") ||
+			!strings.Contains(en.Messages[0].Text, "Resume it after 2026-11-17T09:10:00Z") {
+			t.Errorf("%s after the call: T1's messages %+v", after, en.Messages)
+		}
+	}
+	if len(r.objects) != 0 {
+		t.Fatalf("made %v before the lookup was believed", r.objects)
+	}
+
+	w.clock = now.Add(run.ResendAfter)
+	res := w.resume(e)
+	allDone(t, res)
+	once(t, r, "teams/T1", "teams/T1-ops", "teams/T3")
+	if en := res.Record.Entries[0]; en.Key != "teams/T1" || en.Attempts != 2 {
+		t.Errorf("T1: %+v; want sent again as the second attempt", en)
+	}
+}
+
+// The review's case: a call that never gets an answer, and a lookup that
+// always finds nothing. However many resumes there are, the call is sent
+// again at most once per ResendAfter and MaxAttempts times in all; then the
+// item fails, for the operator to check, and the run can end.
+func TestResumeSendsACallAtMostMaxAttemptsTimes(t *testing.T) {
+	w := newWorkspace(t)
+	r := &remote{objects: map[string]int{}}
+	teams := newStep("teams", r)
+	teams.plan = teamsPlan("T1")
+	teams.errs["teams/T1"] = fmt.Errorf("POST /v1/teams: %w: %w", httperr.ErrUnknownOutcome, httperr.ErrUnavailable)
+	teams.found["teams/T1"] = run.Lookup{Outcome: run.LookupNotFound}
+	e := w.engine(teams)
+	if res := w.apply(e, w.plan(e).Version); res.Info.State != review.Interrupted || r.objects["teams/T1"] != 1 {
+		t.Fatalf("apply: run %s, calls %v", res.Info.State, r.objects)
+	}
+
+	var res run.RunResult
+	for i, step := range []struct {
+		wait  time.Duration
+		calls int
+		state review.RunState
+	}{
+		{0, 1, review.Interrupted},                   // too soon after apply's call
+		{run.ResendAfter, 2, review.Interrupted},     // sent again, and unknown again
+		{0, 2, review.Interrupted},                   // too soon after that one
+		{run.ResendAfter / 2, 2, review.Interrupted}, // still too soon
+		{run.ResendAfter, 3, review.Interrupted},     // the last attempt
+		{run.ResendAfter, 3, review.Completed},       // not sent again: failed
+	} {
+		w.wait(step.wait)
+		res = w.resume(e)
+		if got := r.objects["teams/T1"]; got != step.calls || res.Info.State != step.state {
+			t.Errorf("resume %d: %d calls, run %s; want %d and %s", i+1, got, res.Info.State, step.calls, step.state)
+		}
+	}
+	if r.objects["teams/T1"] != run.MaxAttempts {
+		t.Errorf("%d calls, want %d", r.objects["teams/T1"], run.MaxAttempts)
+	}
+	en := res.Record.Entries[0]
+	if en.State != review.Failed || en.Attempts != run.MaxAttempts || len(en.Messages) != 1 ||
+		en.Messages[0].Code != "not_sent_again" || en.Messages[0].Class != messages.ManualTask {
+		t.Errorf("T1: %+v", en)
+	}
+	if res.Info.Written != 1 || res.Info.Failed != 1 {
+		t.Errorf("counts %d written, %d failed; want 1 and 1", res.Info.Written, res.Info.Failed)
+	}
+	var states []string
+	rows, err := w.st.DB().Query(`SELECT state FROM journal WHERE item_key = 'teams/T1' ORDER BY seq`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := run.FindActive(other)
-	if err != nil || active == nil {
-		t.Fatalf("FindActive = %+v, %v", active, err)
+	for rows.Next() {
+		var s string
+		_ = rows.Scan(&s)
+		states = append(states, s)
 	}
-	if err := run.RequestPause(other, active.RunID, now); err != nil {
+	_ = rows.Close()
+	if !slices.Equal(states, []string{"failed", "failed", "failed"}) {
+		t.Errorf("T1's journal rows %v", states)
+	}
+	w.wait(10 * run.ResendAfter)
+	if _, err := e.Resume(context.Background()); !errors.Is(err, run.ErrNothingToResume) || r.objects["teams/T1"] != run.MaxAttempts {
+		t.Errorf("a resume after the run ended: %v, %d calls", err, r.objects["teams/T1"])
+	}
+}
+
+// pause asked while resume runs its checks stops the run before its first
+// item, after a clean pause as after a crash: the resume command announces
+// the run before its checks. A request left from before the command is not
+// for it and is dropped: one a crash left unanswered, or one that came as
+// the run stopped.
+func TestAPauseDuringResumesChecksStopsItBeforeItsFirstItem(t *testing.T) {
+	for _, stop := range []string{"paused", "crashed"} {
+		t.Run(stop, func(t *testing.T) {
+			ctx := context.Background()
+			w, e, r := crashSetup(t)
+			teams := e.Steps[0].(*fakeStep)
+			v := w.mustLatest(e)
+			// pause during T1's call: the run stops before T1-ops, or crashes
+			// after T1 before it reads the request.
+			teams.during = func(it review.Item) {
+				if it.Key == "teams/T1" {
+					if err := run.RequestPause(w.ws, w.activeRun().RunID, now); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if stop == "crashed" {
+				e.CrashAt(func(at run.CrashPoint, k string) bool { return at == run.CrashPoints[3] && k == "teams/T1" })
+			}
+			res, err := e.Apply(ctx, v, confirmation(v))
+			teams.during = nil
+			switch {
+			case stop == "crashed" && !errors.Is(err, run.ErrCrashed):
+				t.Fatalf("Apply = %v, want the crash", err)
+			case stop == "paused" && (err != nil || res.Info.State != review.Paused):
+				t.Fatalf("Apply = %s, %v; want paused", res.Info.State, err)
+			case stop == "paused":
+				// A second pause that came as the run stopped.
+				if err := run.RequestPause(w.ws, res.Info.ID, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !exists(t, filepath.Join(w.ws.Dir(), run.PauseRequestFile)) {
+				t.Fatal("no pause request left from before resume")
+			}
+
+			// The resume command holds the lock from here on, and announces
+			// the run before its checks.
+			w.reopen()
+			resumed := w.engine(teams)
+			u, err := resumed.Unfinished(ctx)
+			if err != nil || u == nil {
+				t.Fatalf("Unfinished = %+v, %v", u, err)
+			}
+			announce := func() {
+				t.Helper()
+				if err := run.Announce(w.ws, run.ActiveRun{RunID: u.ID, PlanVersion: u.PlanVersion, StartedAt: u.StartedAt}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			announce()
+			if exists(t, filepath.Join(w.ws.Dir(), run.PauseRequestFile)) {
+				t.Error("the pause request from before resume is still there")
+			}
+			other, err := store.OpenWorkspace(w.ws.Dir(), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			active, err := run.FindActive(other)
+			if err != nil || active == nil || active.RunID != u.ID {
+				t.Fatalf("pause during resume's checks: FindActive = %+v, %v; want run %s", active, err, u.ID)
+			}
+			if err := run.RequestPause(other, active.RunID, now); err != nil {
+				t.Fatal(err)
+			}
+			calls := len(teams.applied)
+			res = w.resume(resumed)
+			want := map[string]review.EntryState{"teams/T1": review.Done, "teams/T1-ops": review.Pending,
+				"teams/T2": review.Pending, "teams/T3": review.Pending}
+			if got := states(res.Record); res.Info.State != review.Paused || !maps(got, want) || len(teams.applied) != calls {
+				t.Fatalf("run %s, states %v, calls %v; want paused before T1-ops with no call", res.Info.State, got, teams.applied)
+			}
+			for _, f := range []string{run.PauseRequestFile, run.ActiveRunFile} {
+				if exists(t, filepath.Join(w.ws.Dir(), f)) {
+					t.Errorf("%s is left after the pause", f)
+				}
+			}
+
+			announce()
+			allDone(t, w.resume(resumed))
+			once(t, r, "teams/T1", "teams/T1-ops", "teams/T3")
+			if err := run.Withdraw(w.ws); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Withdraw removes what Announce wrote and a request asked since, so a
+// resume that ends before its run starts leaves neither behind.
+func TestWithdrawRemovesTheAnnouncement(t *testing.T) {
+	w := newWorkspace(t)
+	if err := run.Announce(w.ws, run.ActiveRun{RunID: "20261117-090000-aaaaaa", PlanVersion: 1, StartedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	resumed := w.engine(e.Steps...)
-	if res := w.resume(resumed); res.Info.State != review.Paused || len(remote.objects) != 0 {
-		t.Fatalf("after pause: state %s, remote objects %v", res.Info.State, remote.objects)
+	if a := w.activeRun(); a.RunID != "20261117-090000-aaaaaa" || a.PlanVersion != 1 {
+		t.Errorf("active-run.json %+v", a)
 	}
-	allDone(t, w.resume(resumed))
-	once(t, remote, "teams/T1", "teams/T1-ops", "teams/T3")
+	if err := run.RequestPause(w.ws, "20261117-090000-aaaaaa", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Withdraw(w.ws); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{run.PauseRequestFile, run.ActiveRunFile} {
+		if exists(t, filepath.Join(w.ws.Dir(), f)) {
+			t.Errorf("%s is left after Withdraw", f)
+		}
+	}
 }
 
 // A crash at any point of any call, then resume, makes every object once:
 // the row is committed as sending before the call, and resume looks a
-// sending row up before it sends anything.
+// sending row up before it sends anything. The resume comes once a lookup
+// that finds nothing is believed; one sooner sends nothing (see
+// TestResumeBelievesNotFoundOnlyOnceTheCallIsOldEnough).
 func TestACrashAtAnyPointThenResumeMakesEachObjectOnce(t *testing.T) {
 	calls := []string{"teams/T1", "teams/T1-ops", "teams/T3"}
 	for _, key := range calls {
@@ -327,6 +532,7 @@ func TestACrashAtAnyPointThenResumeMakesEachObjectOnce(t *testing.T) {
 					t.Fatalf("Apply = %v, want the crash", err)
 				}
 				w.reopen()
+				w.wait(run.ResendAfter)
 				e = w.engine(e.Steps...)
 				res := w.resume(e)
 				allDone(t, res)
@@ -359,11 +565,13 @@ func TestACrashWhileResumingMakesEachObjectOnce(t *testing.T) {
 							t.Fatalf("Apply = %v, want the crash", err)
 						}
 						w.reopen()
+						w.wait(run.ResendAfter)
 						e = w.engine(e.Steps...)
 						e.CrashAt(func(at run.CrashPoint, k string) bool { return at == q && k == second })
 						res, err := e.Resume(context.Background())
 						if errors.Is(err, run.ErrCrashed) {
 							w.reopen()
+							w.wait(run.ResendAfter)
 							e = w.engine(e.Steps...)
 							res = w.resume(e)
 						} else if err != nil {
@@ -414,6 +622,7 @@ func TestResumeRebuildsWhatACrashCutShort(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.reopen()
+	w.wait(run.ResendAfter)
 	e = w.engine(e.Steps...)
 	var seen bool
 	e.Steps[0].(*fakeStep).during = func(review.Item) {
@@ -542,6 +751,7 @@ func TestProgressIsToldEachItem(t *testing.T) {
 		t.Fatalf("Apply = %v", err)
 	}
 	w.reopen()
+	w.wait(run.ResendAfter)
 	resumed := w.engine(e.Steps...)
 	resumed.Progress = e.Progress
 	w.resume(resumed)

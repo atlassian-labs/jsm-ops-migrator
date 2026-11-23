@@ -174,8 +174,9 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 		return RunResult{Info: info}, err
 	}
 	// A fresh run has a new ID and cannot have a request until it is
-	// advertised. Resume keeps the same ID, so it must honor a request
-	// accepted during recovery or left unacknowledged by a crash.
+	// advertised, so one here is left over. Resume keeps the run's ID and
+	// leaves the request alone: Announce removed the one left over before
+	// resume's checks, so one there now was asked during them.
 	if err := e.Workspace.RemoveFile(PauseRequestFile); err != nil {
 		return RunResult{Info: info}, err
 	}
@@ -187,11 +188,7 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 // stops. A crash leaves it, and the next apply or resume writes it again.
 func (e *Engine) execute(ctx context.Context, x *executor) (RunResult, error) {
 	info := x.info
-	active, err := json.Marshal(ActiveRun{RunID: info.ID, PlanVersion: info.PlanVersion, StartedAt: info.StartedAt})
-	if err != nil {
-		return RunResult{Info: *info}, err
-	}
-	if err := e.Workspace.WriteFileAtomic(ActiveRunFile, active); err != nil {
+	if err := writeActive(e.Workspace, ActiveRun{RunID: info.ID, PlanVersion: info.PlanVersion, StartedAt: info.StartedAt}); err != nil {
 		return RunResult{Info: *info}, err
 	}
 	record, err := x.run(ctx)

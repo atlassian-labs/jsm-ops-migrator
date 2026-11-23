@@ -23,7 +23,11 @@ import (
 //
 // With no unfinished run, resume says so and exits 0. A run that stops again
 // or does not end with every item done exits with ExitPartial.
-func runResume(ctx context.Context, env *Env, _ ResumeFlags) error {
+//
+// The run is announced to pause before anything else, so pause asked during
+// the checks is accepted and stops the run before its first item, whether
+// the run was paused or crashed.
+func runResume(ctx context.Context, env *Env, _ ResumeFlags) (err error) {
 	// The wrapper holds the workspace lock, so the status cannot change
 	// between this keyless check and opening the encrypted store.
 	status, err := engine.ReadStatus(ctx, env.Workspace)
@@ -40,6 +44,15 @@ func runResume(ctx context.Context, env *Env, _ ResumeFlags) error {
 		_, err := io.WriteString(env.Stdout, "Nothing to resume: no run is unfinished.\n")
 		return err
 	}
+	u := status.Run
+	if err := engine.Announce(env.Workspace, engine.ActiveRun{RunID: u.ID, PlanVersion: u.PlanVersion, StartedAt: u.StartedAt}); err != nil {
+		return err
+	}
+	defer func() {
+		if werr := engine.Withdraw(env.Workspace); werr != nil {
+			err = errors.Join(err, werr)
+		}
+	}()
 	st, err := env.OpenStore(ctx, store.OpenExisting)
 	if err != nil {
 		return err

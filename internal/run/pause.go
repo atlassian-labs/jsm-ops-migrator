@@ -64,9 +64,43 @@ func FindActive(ws *store.Workspace) (*ActiveRun, error) {
 	return &a, nil
 }
 
+// Announce tells pause that the command holding the lock is about to resume
+// the run a names, so a pause asked from now on, while resume still runs its
+// pre-flight checks, stops the run before its first item. That holds after a
+// clean pause, which removed active-run.json, as after a crash, which left
+// it. A pause request already there was asked before this command, so it is
+// not for it: a crash left it unanswered, or it came after the run stopped.
+// Announce removes it, so the run does not stop the moment it is resumed.
+// The command calls Withdraw when it ends.
+func Announce(ws *store.Workspace, a ActiveRun) error {
+	if err := ws.RemoveFile(PauseRequestFile); err != nil {
+		return err
+	}
+	return writeActive(ws, a)
+}
+
+// Withdraw removes active-run.json and the pause request, when the command
+// that announced the run ends, however it ends: no run is being made any
+// more, and a request asked before the run started is answered by the run
+// not starting.
+func Withdraw(ws *store.Workspace) error {
+	if err := ws.RemoveFile(ActiveRunFile); err != nil {
+		return err
+	}
+	return ws.RemoveFile(PauseRequestFile)
+}
+
+func writeActive(ws *store.Workspace, a ActiveRun) error {
+	data, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	return ws.WriteFileAtomic(ActiveRunFile, data)
+}
+
 // RequestPause asks run to stop before its next item. The run removes the
-// request when it stops, and the next run removes one left by a run that
-// stopped before the request was written.
+// request when it stops; apply, and resume when it announces the run, remove
+// one left by a run that stopped before the request was written.
 func RequestPause(ws *store.Workspace, run string, now time.Time) error {
 	data, err := json.Marshal(PauseRequest{RunID: run, RequestedAt: now.UTC()})
 	if err != nil {

@@ -116,7 +116,13 @@ type workspace struct {
 	ws *store.Workspace
 	st *store.Store
 	kp store.KeyProvider
+	// clock is what the engines' Now returns; wait moves it on.
+	clock time.Time
 }
+
+// wait moves the workspace's clock on by d, as the time between two
+// commands does.
+func (w *workspace) wait(d time.Duration) { w.clock = w.clock.Add(d) }
 
 func newWorkspace(t *testing.T) *workspace {
 	t.Helper()
@@ -130,7 +136,7 @@ func newWorkspace(t *testing.T) *workspace {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return &workspace{t: t, ws: ws, st: st, kp: kp}
+	return &workspace{t: t, ws: ws, st: st, kp: kp, clock: now}
 }
 
 // reopen closes the store and opens it again, as the next command after a
@@ -154,7 +160,7 @@ func (w *workspace) reopen() {
 
 func (w *workspace) engine(steps ...run.Step) *run.Engine {
 	return &run.Engine{
-		Store: w.st, Workspace: w.ws, Steps: steps, Now: func() time.Time { return now },
+		Store: w.st, Workspace: w.ws, Steps: steps, Now: func() time.Time { return w.clock },
 		Accounts: map[review.Side]review.MigrationAccount{
 			review.PagerDuty: {ID: "acme.pagerduty.com"},
 			review.JSM:       {ID: "cloud-1", OrgID: "org-1"},

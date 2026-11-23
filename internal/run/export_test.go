@@ -11,6 +11,13 @@ var CrashPoints = []CrashPoint{beforeSending, afterSending, afterCall, afterDone
 // ErrCrashed is what a run stopped by CrashAt returns.
 var ErrCrashed = errCrashed
 
+// ResendAfter and MaxAttempts bound when and how often resume sends a call
+// again.
+const (
+	ResendAfter = resendAfter
+	MaxAttempts = maxAttempts
+)
+
 // CrashAt makes the engine's runs stop when crash returns true.
 func (e *Engine) CrashAt(crash func(p CrashPoint, key string) bool) { e.crash = crash }
 

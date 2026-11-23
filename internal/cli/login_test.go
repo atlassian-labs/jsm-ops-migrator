@@ -55,6 +55,26 @@ type loginSetup struct {
 	// onChoose runs when a choice is asked for, before it is answered, and
 	// onSteps when the steps are built, before the pre-flight checks.
 	onChoose, onSteps func()
+	// now is the commands' clock; zero means loginNow. wait moves it on.
+	now time.Time
+}
+
+func (s *loginSetup) clock() time.Time {
+	if s.now.IsZero() {
+		return loginNow
+	}
+	return s.now
+}
+
+// wait moves the commands' clock on by d, as the time between two commands
+// does, and the sites' clocks with it, so the pre-flight checks still find
+// them matching.
+func (s *loginSetup) wait(d time.Duration) {
+	s.now = s.clock().Add(d)
+	for name, site := range s.apis.Sites {
+		site.ServerTime = site.ServerTime.Add(d)
+		s.apis.Sites[name] = site
+	}
 }
 
 func newLoginSetup(t *testing.T) *loginSetup {
@@ -97,7 +117,7 @@ func (s *loginSetup) run(args ...string) result {
 	opts := Options{
 		Keychain:   s.kc,
 		NewClients: s.clients,
-		Now:        func() time.Time { return loginNow },
+		Now:        s.clock,
 	}
 	if s.steps != nil {
 		opts.NewSteps = func(env *Env, _ credentials.Set) ([]engine.Step, error) {

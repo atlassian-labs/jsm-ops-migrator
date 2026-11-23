@@ -19,6 +19,19 @@ import (
 // made and has no answer recorded yet.
 const sending review.EntryState = "sending"
 
+// resendAfter is how long after an attempt was sent resume first believes a
+// lookup that finds nothing. A JSM write can take a moment to show, and the
+// call can still be in flight well after its row was written: one attempt
+// waits up to 30 seconds for its answer, and turning on Operations is polled
+// for 2 minutes. A lookup sooner than this can miss what the call made.
+const resendAfter = 10 * time.Minute
+
+// maxAttempts is how many times in all resume lets an item's call be sent. A
+// lookup that keeps finding nothing may be wrong, and each call it lets
+// through can make one more object. Three still finishes a run that crashed
+// before its call and then again while resuming, before a call was sent.
+const maxAttempts = 3
+
 // journalRow is one row of the journal.
 type journalRow struct {
 	seq       int
@@ -103,6 +116,8 @@ func newExecutor(e *Engine, info *RunInfo, p review.Plan, jsm *discover.Snapshot
 // run and writes its record. An item whose call is sending or unknown, which
 // only a resumed run has, is looked up first. Before each item it checks
 // whether the operator asked the run to stop, and if so stops there, paused.
+// It stops interrupted at a call cut short by ctx, and at a lookup that
+// found nothing too soon after the call to be believed.
 //
 // The bookkeeping after a call uses a context that ctx ending does not
 // cancel: a call that was answered is recorded whatever happens to the
@@ -126,18 +141,18 @@ func (x *executor) run(ctx context.Context) (review.Run, error) {
 			break
 		}
 		var res Result
-		var inFlight bool
+		var stop bool
 		var err error
 		if seen {
-			res, inFlight, err = x.settle(ctx, db, it, row)
+			res, stop, err = x.settle(ctx, db, it, row)
 		} else {
-			res, inFlight, err = x.take(ctx, db, it, nil)
+			res, stop, err = x.take(ctx, db, it, nil)
 		}
 		if err != nil {
 			return review.Run{}, err
 		}
 		x.results[it.Key] = res
-		if inFlight {
+		if stop {
 			state = review.Interrupted
 			break
 		}
@@ -386,24 +401,51 @@ func (x *executor) send(ctx context.Context, row journalRow, it review.Item, pre
 
 // settle looks up an item whose call is sending or unknown, when a run is
 // resumed. Found is done, with the object it found. Not found is proven not
-// to have taken effect, so the call is sent again (AGENTS.md rule 6).
-// Anything else leaves it unknown, for the next resume.
+// to have taken effect only once the attempt is resendAfter old; then the
+// call is sent again (AGENTS.md rule 6), unless it was sent maxAttempts
+// times already, which fails it for the operator to check. Anything else
+// leaves it unknown, for the next resume.
+//
+// The age is measured from the attempt's started_at, which is written before
+// the call and never changed, and the count is the journal's attempt number,
+// which rises with each attempt in the transaction that writes it, so no
+// number of resumes gets a call sent sooner or more often. A not found that
+// comes too soon stops the run there: it is settled by the next resume once
+// the attempt is old enough, and the items that depend on it wait for that
+// resume instead of being declined in this one.
 func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRow) (Result, bool, error) {
 	deps := x.deps(it)
 	found, err := x.e.step(it.Step()).Lookup(ctx, it, deps, x.jsm)
 	if err != nil && ctx.Err() != nil {
 		return Result{State: review.Unknown}, true, nil
 	}
-	if err == nil && found.Outcome == LookupNotFound {
+	now := x.e.now()
+	notFound := err == nil && found.Outcome == LookupNotFound
+	believed := row.started.Add(resendAfter)
+	if notFound && !now.Before(believed) && row.attempt < maxAttempts {
 		return x.take(ctx, db, it, &row)
 	}
 	before := row.state
-	row.finished = x.e.now()
-	if err == nil && found.Outcome == LookupFound && found.JSM != nil {
+	row.finished = now
+	stop := false
+	switch {
+	case err == nil && found.Outcome == LookupFound && found.JSM != nil:
 		row.state, row.jsm = review.Done, found.JSM
 		row.msgs = []messages.Message{{Class: messages.Information, Code: "outcome_found",
 			Text: fmt.Sprintf("JSM did not answer the %s call, but a lookup when the run was resumed found that it took effect.", it.Action)}}
-	} else {
+	case notFound && now.Before(believed):
+		row.state, row.jsm, stop = review.Unknown, nil, true
+		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "lookup_too_soon",
+			Text: fmt.Sprintf("A lookup when the run was resumed found nothing, but the %s call was sent at %s, and a lookup this soon "+
+				"after a call can miss what it made, so the run stopped here. Resume it after %s: the call is looked up again then, "+
+				"and sent again only if it still did not take effect.", it.Action, messageTime(row.started), messageTime(believed))}}
+	case notFound:
+		row.state, row.jsm = review.Failed, nil
+		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "not_sent_again",
+			Text: fmt.Sprintf("A lookup when the run was resumed found that the %s call did not take effect, but it was tried %d times "+
+				"already, so it is not sent again: a lookup that keeps finding nothing can be wrong. Check in JSM whether it took "+
+				"effect before you plan again.", it.Action, row.attempt)}}
+	default:
 		row.state, row.jsm = review.Unknown, nil
 		text := fmt.Sprintf("It is still not known whether the %s call took effect: the lookup when the run was resumed "+
 			"could not tell. Check it in JSM; the next resume looks it up again.", it.Action)
@@ -420,8 +462,11 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 	if row.state == review.Done {
 		res.JSM = row.jsm
 	}
-	return res, false, nil
+	return res, stop, nil
 }
+
+// messageTime is t as a message names it: in UTC, to the second.
+func messageTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // failed records a call that returned an error. An unknown outcome is looked
 // up once, at once: found means done. Anything else leaves it unknown, and
@@ -444,7 +489,8 @@ func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps R
 	}
 	row.state, row.jsm = review.Unknown, nil
 	text := fmt.Sprintf("It is not known whether the %s call took effect: %v. resume looks it up again and sends it "+
-		"only if it did not; until then, check it in JSM.", it.Action, callErr)
+		"again only if a lookup %d minutes after the call finds it did not; until then, check it in JSM.",
+		it.Action, callErr, int(resendAfter/time.Minute))
 	if lookErr != nil {
 		text += fmt.Sprintf(" The lookup failed too: %v.", lookErr)
 	}

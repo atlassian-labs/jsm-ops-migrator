@@ -62,13 +62,20 @@ func (e *Engine) CheckResumeSteps(r *Resumable) error {
 // Resume continues the unfinished run on its own plan version, from the
 // first item that has no final state. Before an item whose call is sending
 // or unknown is taken further, its step looks it up: found is done, and only
-// not found sends the call again. A lookup that cannot tell leaves the item
-// unknown and the run unfinished, for the next resume.
+// not found sends the call again, once the attempt is old enough for the
+// lookup to be believed and at most maxAttempts times in all. A lookup that
+// cannot tell leaves the item unknown and the run unfinished, for the next
+// resume.
 //
 // A run marked running is one whose command ended without marking it, such
 // as in a crash: the caller holds the workspace lock, so no other command is
 // making it. The run record and the version's confirmation.md are written
 // again first, so both are right even if a crash cut them short.
+//
+// A pause request for the run stops it before its first item without a
+// final state. The caller announces the run with Announce before its own
+// checks, which removes a request left from before, so the one Resume finds
+// was asked during them, after a clean pause and after a crash alike.
 func (e *Engine) Resume(ctx context.Context) (RunResult, error) {
 	r, err := e.CheckResume(ctx)
 	if err != nil {

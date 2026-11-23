@@ -12,5 +12,8 @@
 // continues it from the journal. A call that may have reached JSM without
 // its answer being recorded is looked up before anything else, and sent
 // again only when its step proves it did not take effect, so a crash at any
-// point makes no object twice.
+// point makes no object twice. A lookup that finds nothing is believed only
+// once the call is ten minutes old, because a lookup sooner can miss what
+// the call made, and a call is sent at most three times in all, whatever
+// number of resumes there are.
 package run
