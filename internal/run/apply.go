@@ -10,30 +10,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
-	"time"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/discover"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 )
-
-// The root files an apply keeps while it runs.
-const (
-	// ActiveRunFile names the run an apply is making, so pause can find it
-	// without the data key.
-	ActiveRunFile = "active-run.json"
-	// PauseRequestFile asks the apply named in it to stop after its current
-	// call.
-	PauseRequestFile = "pause-request.json"
-)
-
-// ActiveRun is what active-run.json holds.
-type ActiveRun struct {
-	RunID       string    `json:"run_id"`
-	PlanVersion int       `json:"plan_version"`
-	StartedAt   time.Time `json:"started_at"`
-}
 
 var (
 	// ErrApplied means the plan version already has a run. A version is run
@@ -45,7 +27,7 @@ var (
 	ErrUnknownStep = errors.New("the plan has calls for a step this jsm-ops-migrator does not have")
 )
 
-// recordEvery is how many items apply takes between two rewrites of the run
+// recordEvery is how many items a run takes between two rewrites of the run
 // record. Rewriting it after each one would cost time that grows with the
 // run, and a run can have tens of thousands of items; the journal has every
 // result anyway, and the record is rebuilt from it.
@@ -92,15 +74,22 @@ func (e *Engine) CheckPlan(ctx context.Context, v *PlanVersion) error {
 	if v.Blockers > 0 {
 		return v.Blocked()
 	}
+	return e.checkPlanFile(v, "run plan again")
+}
+
+// checkPlanFile refuses a version whose plan.json is missing or is not the
+// one plan wrote: the operator reviewed the file, and the run makes the calls
+// of state.db's copy.
+func (e *Engine) checkPlanFile(v *PlanVersion, then string) error {
 	path := filepath.Join(v.Dir, review.PlanFile)
 	data, err := os.ReadFile(filepath.Join(e.Workspace.ArtifactsDir(), path))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return messages.ValidationFailed(fmt.Errorf("%s is missing; run plan again", path))
+		return messages.ValidationFailed(fmt.Errorf("%s is missing; %s", path, then))
 	case err != nil:
 		return err
 	case review.Hash(data) != v.Hash:
-		return messages.ValidationFailed(fmt.Errorf("%s was changed after plan wrote it; run plan again", path))
+		return messages.ValidationFailed(fmt.Errorf("%s was changed after plan wrote it; %s", path, then))
 	}
 	return nil
 }
@@ -110,9 +99,13 @@ func (e *Engine) CheckPlanSteps(v *PlanVersion) error {
 	if err := e.checkSteps(); err != nil {
 		return err
 	}
+	return e.checkKnownSteps(v, "run plan again")
+}
+
+func (e *Engine) checkKnownSteps(v *PlanVersion, then string) error {
 	for _, it := range v.Plan.Items {
 		if it.Action.Calls() && e.step(it.Step()) == nil {
-			return fmt.Errorf("%w: %s; run plan again", ErrUnknownStep, review.Quote(it.Step()))
+			return fmt.Errorf("%w: %s; %s", ErrUnknownStep, review.Quote(it.Step()), then)
 		}
 	}
 	return nil
@@ -132,7 +125,7 @@ func (e *Engine) CheckAccounts(v *PlanVersion) error {
 	return nil
 }
 
-// RunResult is what Apply did.
+// RunResult is what Apply or Resume did.
 type RunResult struct {
 	Info RunInfo
 	// Record is the run record as it was last written.
@@ -147,7 +140,10 @@ type RunResult struct {
 // are taken as planned, each step deciding from the results of the items it
 // depends on. So a run whose items did not all end done is a result, not an
 // error. Apply returns an error only when the run cannot go on: state.db or
-// the record cannot be written. When ctx ends, the run stops after the call
+// the record cannot be written.
+//
+// The run stops before its next item when Interrupted is closed or pause
+// asks it to, and is marked paused. When ctx ends, it stops after the call
 // in flight and is marked interrupted.
 func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmation) (RunResult, error) {
 	if err := e.CheckApply(ctx, v); err != nil {
@@ -177,26 +173,32 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 	if err := review.WriteConfirmation(e.Workspace, c, v.Plan); err != nil {
 		return RunResult{Info: info}, err
 	}
-	// A pause request left by an apply that has ended is not for this one.
+	// A fresh run has a new ID and cannot have a request until it is
+	// advertised, so one here is left over. Resume keeps the run's ID and
+	// leaves the request alone: Announce removed the one left over before
+	// resume's checks, so one there now was asked during them.
 	if err := e.Workspace.RemoveFile(PauseRequestFile); err != nil {
 		return RunResult{Info: info}, err
 	}
-	active, err := json.Marshal(ActiveRun{RunID: info.ID, PlanVersion: info.PlanVersion, StartedAt: info.StartedAt})
-	if err != nil {
-		return RunResult{Info: info}, err
+	return e.execute(ctx, newExecutor(e, &info, v.Plan, jsm, journal{}))
+}
+
+// execute runs x with the root files a running apply keeps: active-run.json,
+// which tells pause a run is going, written first, and removed once the run
+// stops. A crash leaves it, and the next apply or resume writes it again.
+func (e *Engine) execute(ctx context.Context, x *executor) (RunResult, error) {
+	info := x.info
+	if err := writeActive(e.Workspace, ActiveRun{RunID: info.ID, PlanVersion: info.PlanVersion, StartedAt: info.StartedAt}); err != nil {
+		return RunResult{Info: *info}, err
 	}
-	if err := e.Workspace.WriteFileAtomic(ActiveRunFile, active); err != nil {
-		return RunResult{Info: info}, err
-	}
-	x := &executor{e: e, info: &info, plan: v.Plan, jsm: jsm, results: Results{}}
 	record, err := x.run(ctx)
 	if err != nil {
-		return RunResult{Info: info}, err
+		return RunResult{Info: *info}, err
 	}
 	if err := e.Workspace.RemoveFile(ActiveRunFile); err != nil {
-		return RunResult{Info: info, Record: record}, err
+		return RunResult{Info: *info, Record: record}, err
 	}
-	return RunResult{Info: info, Record: record}, nil
+	return RunResult{Info: *info, Record: record}, nil
 }
 
 // lookupRead is the JSM read a run's lookups compare with: the latest
@@ -244,303 +246,24 @@ func (e *Engine) confirm(ctx context.Context, info RunInfo, c review.Confirmatio
 	})
 }
 
+// confirmation reads the confirmation of a version from state.db.
+func (e *Engine) confirmation(ctx context.Context, version int) (review.Confirmation, error) {
+	var sealed []byte
+	if err := e.Store.DB().QueryRowContext(ctx, `SELECT record FROM confirmations WHERE plan_version = ?`,
+		version).Scan(&sealed); err != nil {
+		return review.Confirmation{}, fmt.Errorf("the confirmation of plan v%d: %w", version, err)
+	}
+	data, err := e.Store.Cipher().Open(confirmationRef(version), sealed)
+	if err != nil {
+		return review.Confirmation{}, err
+	}
+	var c review.Confirmation
+	if err := json.Unmarshal(data, &c); err != nil {
+		return review.Confirmation{}, fmt.Errorf("the confirmation of plan v%d: %w", version, err)
+	}
+	return c, nil
+}
+
 func confirmationRef(version int) store.FieldRef {
 	return store.FieldRef{Table: "confirmations", Item: "v" + strconv.Itoa(version), Column: "record"}
-}
-
-// sending is the journal state of a call that was about to be made, or was
-// made and has no answer recorded yet.
-const sending review.EntryState = "sending"
-
-// journalRow is one row of the journal.
-type journalRow struct {
-	seq       int
-	key       string
-	attempt   int
-	state     review.EntryState
-	started   time.Time
-	finished  time.Time
-	status    int
-	requestID string
-	jsm       *review.Ref
-	msgs      []messages.Message
-}
-
-type executor struct {
-	e       *Engine
-	info    *RunInfo
-	plan    review.Plan
-	jsm     *discover.Snapshot
-	results Results
-	seq     int
-}
-
-// run takes every item in order, then marks the run completed and writes
-// its record. The bookkeeping after a call uses a context that ctx ending
-// does not cancel: a call that was answered is recorded whatever happens to
-// the command.
-func (x *executor) run(ctx context.Context) (review.Run, error) {
-	db := context.WithoutCancel(ctx)
-	for i, it := range x.plan.Items {
-		if ctx.Err() != nil {
-			x.info.State = review.Interrupted
-			break
-		}
-		res, inFlight, err := x.take(ctx, db, it)
-		if err != nil {
-			return review.Run{}, err
-		}
-		x.results[it.Key] = res
-		if inFlight {
-			x.info.State = review.Interrupted
-			break
-		}
-		if (i+1)%recordEvery == 0 {
-			if _, err := x.writeRecord(db, *x.info); err != nil {
-				return review.Run{}, err
-			}
-		}
-	}
-	final := *x.info
-	switch {
-	case final.State != review.Running:
-	case x.unsettled() > 0:
-		// A call whose outcome is unknown may have made its object. Until
-		// resume looks it up, the run is unfinished, so no new plan or run
-		// plans the object again and sends a second create.
-		final.State = review.Interrupted
-	default:
-		final.State = review.Completed
-		final.EndedAt = x.e.now()
-	}
-	// Keep the journal recoverable until every final artifact is on disk.
-	record, err := x.writeRecord(db, final)
-	if err != nil {
-		return review.Run{}, err
-	}
-	var ended any
-	if !final.EndedAt.IsZero() {
-		ended = formatTime(final.EndedAt)
-	}
-	if _, err := x.e.Store.DB().ExecContext(db, `UPDATE runs SET state = ?, ended_at = ? WHERE id = ?`,
-		string(final.State), ended, final.ID); err != nil {
-		return review.Run{}, err
-	}
-	*x.info = final
-	return record, nil
-}
-
-// unsettled counts the items whose call may have taken effect without the
-// run knowing what it made.
-func (x *executor) unsettled() int {
-	n := 0
-	for _, r := range x.results {
-		if r.State == review.Unknown {
-			n++
-		}
-	}
-	return n
-}
-
-func (x *executor) writeRecord(ctx context.Context, info RunInfo) (review.Run, error) {
-	r, err := x.e.record(ctx, info, x.plan)
-	if err != nil {
-		return review.Run{}, err
-	}
-	if _, err := review.WriteRun(x.e.Workspace, r); err != nil {
-		return review.Run{}, err
-	}
-	return r, nil
-}
-
-// take takes one item. An item that makes no call is recorded as done at
-// once: a map links its PagerDuty object to the JSM object it names. An item
-// that makes a call is recorded as sending before the call, and with its
-// answer after. inFlight reports that ctx ended while the call was being
-// made, so its row stays sending: the call may have reached JSM, and resume
-// looks it up before anything else.
-func (x *executor) take(ctx, db context.Context, it review.Item) (res Result, inFlight bool, err error) {
-	deps := make(Results, len(it.DependsOn))
-	for _, d := range it.DependsOn {
-		deps[d] = x.results[d]
-	}
-	x.seq++
-	row := journalRow{seq: x.seq, key: it.Key, state: review.Done, started: x.e.now(), jsm: it.JSM}
-	if !it.Action.Calls() {
-		row.finished = row.started
-		if err := x.finish(db, row, it, true); err != nil {
-			return Result{}, false, err
-		}
-		return Result{State: review.Done, JSM: it.JSM}, false, nil
-	}
-
-	row.attempt, row.state = 1, sending
-	if _, err := x.e.Store.DB().ExecContext(db, `INSERT INTO journal(run_id, seq, item_key, attempt, state, started_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, x.info.ID, row.seq, row.key, row.attempt, string(row.state), formatTime(row.started)); err != nil {
-		return Result{}, false, err
-	}
-	step := x.e.step(it.Step())
-	out, callErr := step.Apply(ctx, it, deps)
-	if callErr != nil && ctx.Err() != nil {
-		return Result{State: review.Unknown}, true, nil
-	}
-	row.finished, row.status, row.requestID, row.msgs = x.e.now(), out.Status, out.RequestID, out.Messages
-	switch {
-	case callErr == nil && out.Declined:
-		row.state, row.jsm, row.attempt = review.Declined, nil, 0
-		if len(row.msgs) == 0 {
-			row.msgs = []messages.Message{{Class: messages.Warning, Code: "declined",
-				Text: "The step made no call, because of the result of an item it depends on."}}
-		}
-	case callErr == nil:
-		row.state = review.Done
-		if out.JSM != nil {
-			row.jsm = out.JSM
-		}
-	default:
-		x.failed(ctx, step, it, deps, callErr, &row)
-	}
-	x.checkAnswer(it, &row)
-	if err := x.finish(db, row, it, false); err != nil {
-		return Result{}, false, err
-	}
-	res = Result{State: row.state}
-	if row.state == review.Done {
-		res.JSM = row.jsm
-	}
-	return res, false, nil
-}
-
-// failed records a call that returned an error. An unknown outcome is looked
-// up once, at once: found means done. Anything else leaves it unknown, and
-// it is never sent again within the run, because a JSM write can take a
-// moment to show, so a lookup right after the call can miss what it made.
-func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps Results, callErr error, row *journalRow) {
-	class := messages.Classify(callErr, messages.Write)
-	if class != messages.ManualTask {
-		row.state, row.jsm = review.Failed, nil
-		row.msgs = append(row.msgs, messages.Message{Class: class, Code: "call_failed",
-			Text: fmt.Sprintf("The %s call failed: %v", it.Action, callErr)})
-		return
-	}
-	found, lookErr := step.Lookup(ctx, it, deps, x.jsm)
-	if lookErr == nil && found.Outcome == LookupFound && found.JSM != nil {
-		row.state, row.jsm = review.Done, found.JSM
-		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "outcome_found",
-			Text: fmt.Sprintf("JSM did not answer the %s call (%v), but a lookup found that it took effect.", it.Action, callErr)})
-		return
-	}
-	row.state, row.jsm = review.Unknown, nil
-	text := fmt.Sprintf("It is not known whether the %s call took effect: %v. resume looks it up again and sends it "+
-		"only if it did not; until then, check it in JSM.", it.Action, callErr)
-	if lookErr != nil {
-		text += fmt.Sprintf(" The lookup failed too: %v.", lookErr)
-	}
-	row.msgs = append(row.msgs, messages.Message{Class: messages.ManualTask, Code: "outcome_unknown", Text: text})
-}
-
-// checkAnswer checks what the step answered as the run record will check
-// it, because an answer the record cannot hold would make every later
-// rewrite of the record fail. Messages it cannot hold are replaced by one
-// that says so. A JSM object it cannot hold is not recorded, so the call is
-// unknown: it was made, but what it made is not known, and resume looks it
-// up instead of sending it again.
-func (x *executor) checkAnswer(it review.Item, row *journalRow) {
-	// A request ID comes from the API's answer, so it is kept as the run
-	// record shows it.
-	row.requestID = messages.Clean(row.requestID)
-	for i := range row.msgs {
-		row.msgs[i].Item = it.Key
-	}
-	entry := review.Entry{Key: it.Key, Action: it.Action, State: row.state, PagerDuty: it.PagerDuty, Messages: row.msgs}
-	if err := (review.Run{ID: x.info.ID, State: review.Running, Entries: []review.Entry{entry}}).Check(); err != nil {
-		row.msgs = []messages.Message{{Class: messages.Warning, Code: "answer_unrecorded", Item: it.Key,
-			Text: fmt.Sprintf("The step's messages about this call cannot be recorded: %v", err)}}
-	}
-	if row.jsm == nil {
-		return
-	}
-	entry.JSM, entry.Messages = row.jsm, nil
-	if err := (review.Run{ID: x.info.ID, State: review.Running, Entries: []review.Entry{entry}}).Check(); err != nil {
-		row.state, row.jsm = review.Unknown, nil
-		row.msgs = append(row.msgs, messages.Message{Class: messages.ManualTask, Code: "object_unrecorded", Item: it.Key,
-			Text: fmt.Sprintf("The %s call was made, but the JSM object the step gave cannot be recorded: %v. resume looks it up; "+
-				"until then, check it in JSM.", it.Action, err)})
-	}
-}
-
-// finish writes the item's final row, its mapping and the run's counts in
-// one transaction, so the mapping never runs ahead of the journal and the
-// counts the menu reads always match it.
-func (x *executor) finish(ctx context.Context, row journalRow, it review.Item, insert bool) error {
-	var sealed []byte
-	if len(row.msgs) > 0 {
-		// Texts are kept as the run record shows them: a call's error can
-		// quote what the API was sent, and a phone number is never stored,
-		// sealed or not.
-		for i := range row.msgs {
-			row.msgs[i].Item = it.Key
-			row.msgs[i] = row.msgs[i].Redacted()
-		}
-		data, err := json.Marshal(row.msgs)
-		if err != nil {
-			return err
-		}
-		if sealed, err = x.e.Store.Cipher().Seal(journalRef(x.info.ID, row.seq), data); err != nil {
-			return err
-		}
-	}
-	var jsmType, jsmID any
-	if row.jsm != nil {
-		jsmType, jsmID = row.jsm.Type, row.jsm.ID
-	}
-	var status any
-	if row.status != 0 {
-		status = row.status
-	}
-	var requestID any
-	if row.requestID != "" {
-		requestID = row.requestID
-	}
-	failed := 0
-	if row.state != review.Done {
-		failed = 1
-	}
-	err := x.e.Store.WithTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		if insert {
-			_, err = tx.ExecContext(ctx, `INSERT INTO journal(run_id, seq, item_key, attempt, state, started_at, finished_at,
-				status, request_id, jsm_type, jsm_id, messages) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				x.info.ID, row.seq, row.key, row.attempt, string(row.state), formatTime(row.started), formatTime(row.finished),
-				status, requestID, jsmType, jsmID, sealed)
-		} else {
-			_, err = tx.ExecContext(ctx, `UPDATE journal SET attempt = ?, state = ?, finished_at = ?, status = ?, request_id = ?,
-				jsm_type = ?, jsm_id = ?, messages = ? WHERE run_id = ? AND seq = ?`,
-				row.attempt, string(row.state), formatTime(row.finished), status, requestID, jsmType, jsmID, sealed, x.info.ID, row.seq)
-		}
-		if err != nil {
-			return err
-		}
-		if row.state == review.Done && it.PagerDuty != nil && row.jsm != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO mappings(pagerduty_type, pagerduty_id, jsm_type, jsm_id, run_id,
-				item_key, mapped_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(pagerduty_type, pagerduty_id, jsm_type) DO UPDATE SET jsm_id = excluded.jsm_id,
-				run_id = excluded.run_id, item_key = excluded.item_key, mapped_at = excluded.mapped_at`,
-				it.PagerDuty.Type, it.PagerDuty.ID, row.jsm.Type, row.jsm.ID, x.info.ID, it.Key, formatTime(row.finished)); err != nil {
-				return err
-			}
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE runs SET written = written + 1, failed = failed + ? WHERE id = ?`, failed, x.info.ID)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	x.info.Written++
-	x.info.Failed += failed
-	return nil
-}
-
-func journalRef(run string, seq int) store.FieldRef {
-	return store.FieldRef{Table: "journal", Item: run + "/" + strconv.Itoa(seq), Column: "messages"}
 }

@@ -32,6 +32,10 @@ type FakeAPIs struct {
 	// Members maps an organization to the emails of its accounts.
 	Members map[string][]string
 	FindErr error
+	// AccountID, when set, is the account the org admin check finds instead
+	// of account-of-<organization>, as when someone else's credentials are
+	// given.
+	AccountID string
 
 	mu    sync.Mutex
 	calls []string
@@ -133,6 +137,9 @@ func (c fakeClients) FindUser(_ context.Context, orgID string, email credentials
 		return preflight.Account{}, c.f.FindErr
 	}
 	for _, m := range c.f.Members[orgID] {
+		if m == email.Value() && c.f.AccountID != "" {
+			return preflight.Account{AccountID: c.f.AccountID}, nil
+		}
 		if m == email.Value() {
 			return preflight.Account{AccountID: "account-of-" + orgID}, nil
 		}

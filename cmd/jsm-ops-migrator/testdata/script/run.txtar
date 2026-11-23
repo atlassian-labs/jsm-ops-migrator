@@ -46,5 +46,15 @@ exec jsm-ops-migrator plan
 stdout 'Plan v1 is unchanged since run .* applied it: there is nothing new to apply'
 ! exists $W/plans/v2
 
+# With no run going and none unfinished, pause and resume say so.
+exec jsm-ops-migrator pause
+stdout 'No apply is running, so there is nothing to pause.'
+! exists $WORK/home/jsm-ops-migrator/pause-request.json
+exec jsm-ops-migrator resume
+stdout 'Nothing to resume: no run is unfinished.'
+exec jsm-ops-migrator pause --output json
+stdout '"running": false'
+stdout '"state": "completed"'
+
 ! stdout 'canary'
 ! stderr 'canary'

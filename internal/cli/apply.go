@@ -26,7 +26,9 @@ import (
 // apply.
 //
 // A run whose items do not all end done exits with ExitPartial: the run
-// carried on past each failure, and its record says what is left.
+// carried on past each failure, and its record says what is left. So does a
+// run that the first Ctrl+C, or pause in another window, stopped before its
+// next item; resume finishes it.
 func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 	st, err := env.OpenStore(ctx, store.OpenExisting)
 	if err != nil {
@@ -116,6 +118,15 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 		}
 	}
 
+	// A Ctrl+C during the checks or the prompts stops apply before the run
+	// exists, so nothing waits for resume; nobody is asked to confirm a plan
+	// after asking to stop.
+	stopped := func() error {
+		return out.emit(env, fmt.Errorf("apply: stopped at Ctrl+C: plan v%d was not applied, and nothing was written", v.Version))
+	}
+	if interrupted(env) {
+		return stopped()
+	}
 	c := review.Confirmation{PlanVersion: v.Version, PlanHash: v.Hash, AccountID: report.Operator.AccountID}
 	if accept != nil {
 		c.Via = review.ViaFile
@@ -146,21 +157,14 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 		}
 	}
 	c.At = env.Now()
+	if interrupted(env) {
+		return stopped()
+	}
 
+	view := startRunView(env, e)
 	res, err := e.Apply(ctx, v, c)
-	if res.Info.ID != "" {
-		out.Run = runResult(env.Workspace, res)
-	}
-	if err != nil {
-		return out.emit(env, fmt.Errorf("apply: %w", err))
-	}
-	if env.Output == OutputText {
-		if err := writeRun(env.Stdout, out.Run); err != nil {
-			return err
-		}
-	}
-	env.summarize(runSummary(out.Run))
-	return out.emit(env, runError(out.Run))
+	view.close()
+	return finishRun(env, "apply", out, res, err)
 }
 
 // askReasons asks for a reason for each warning of the plan, as the
@@ -327,17 +331,18 @@ func have(n int) string {
 
 // runError is the command's error for a run: nil when every item is done,
 // and otherwise one that exits with ExitPartial.
-func runError(r *runOutput) error {
+func runError(command string, r *runOutput) error {
 	switch {
-	case r.State != review.Completed && r.Counts.Pending == 0 && r.Counts.Unknown > 0:
-		return messages.PartiallyComplete(fmt.Errorf("apply: %s an unknown outcome, so run %s is unfinished; "+
-			"run 'jsm-ops-migrator resume' to look them up before anything else", count(r.Counts.Unknown, "call")+have(r.Counts.Unknown), r.ID))
+	case r.State == review.Interrupted && r.Counts.Pending == 0 && r.Counts.Unknown > 0:
+		return messages.PartiallyComplete(fmt.Errorf("%s: %s an unknown outcome, so run %s is unfinished; "+
+			"run 'jsm-ops-migrator resume' to look them up before anything else",
+			command, count(r.Counts.Unknown, "call")+have(r.Counts.Unknown), r.ID))
 	case r.State != review.Completed:
-		return messages.PartiallyComplete(fmt.Errorf("apply: run %s was %s after %d of %d items; run 'jsm-ops-migrator resume' to finish it",
-			r.ID, r.State, r.Counts.Total-r.Counts.Pending, r.Counts.Total))
+		return messages.PartiallyComplete(fmt.Errorf("%s: run %s was %s after %d of %d items; run 'jsm-ops-migrator resume' to finish it",
+			command, r.ID, r.State, r.Counts.Total-r.Counts.Pending, r.Counts.Total))
 	case r.Counts.Done < r.Counts.Total:
-		return messages.PartiallyComplete(fmt.Errorf("apply: %d of %d items are not done (%s); see %s",
-			r.Counts.Total-r.Counts.Done, r.Counts.Total, notDone(r.Counts), displayPath(r.Record)))
+		return messages.PartiallyComplete(fmt.Errorf("%s: %d of %d items are not done (%s); see %s",
+			command, r.Counts.Total-r.Counts.Done, r.Counts.Total, notDone(r.Counts), displayPath(r.Record)))
 	}
 	return nil
 }

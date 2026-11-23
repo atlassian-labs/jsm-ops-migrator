@@ -66,7 +66,8 @@ type Options struct {
 	// left. main passes a function that exits with code 130.
 	ForceExit func()
 	// DescribeWorkspace adds what the Run engine knows to the menu's status:
-	// the latest plan and apply.
+	// the latest plan and apply. Nil means the engine's status read, which
+	// needs neither the data key nor the lock.
 	DescribeWorkspace func(ctx context.Context, ws *store.Workspace, cfg Config, s *MenuState)
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
@@ -106,6 +107,9 @@ func executeWith(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	if opts.Keychain == nil {
 		opts.Keychain = noKeychain{}
+	}
+	if opts.DescribeWorkspace == nil {
+		opts.DescribeWorkspace = describeWorkspace
 	}
 	code, r := executeOnce(ctx, args, stdin, stdout, stderr, opts, b, h)
 	if !r.wantMenu {
