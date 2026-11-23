@@ -15,11 +15,10 @@ import (
 )
 
 // runResume continues the unfinished run on its own plan version, from the
-// first item without a result. A call that may have reached JSM is looked up
-// before anything else, and sent again only when the lookup proves it did
-// not take effect. The pre-flight checks run again first, as for apply. The
-// run's confirmation stands, so resume asks for none; it needs the API token
-// of the account the confirmation names, which makes every call of the run.
+// first item without a result. It looks up unresolved creates and can retry
+// unresolved updates after a lookup miss. Pre-flight checks run before any
+// writes. The run keeps its confirmation and needs a token for the account
+// that confirmed it.
 //
 // With no unfinished run, resume says so and exits 0. A run that stops again
 // or does not end with every item done exits with ExitPartial.
@@ -78,7 +77,7 @@ func runResume(ctx context.Context, env *Env, _ ResumeFlags) (err error) {
 			return err
 		}
 	}
-	if err := checksError("resume", report); err != nil {
+	if err := writePreflightError("resume", report); err != nil {
 		env.summarize(checksSummary(report.Checks))
 		return out.emit(env, err)
 	}

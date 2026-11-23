@@ -19,17 +19,14 @@ import (
 // made and has no answer recorded yet.
 const sending review.EntryState = "sending"
 
-// resendAfter is how long after an attempt was sent resume first believes a
-// lookup that finds nothing. A JSM write can take a moment to show, and the
+// resendAfter is how long after an update attempt resume first believes a
+// lookup that finds no change. A JSM write can take a moment to show, and the
 // call can still be in flight well after its row was written: one attempt
 // waits up to 30 seconds for its answer, and turning on Operations is polled
 // for 2 minutes. A lookup sooner than this can miss what the call made.
 const resendAfter = 10 * time.Minute
 
-// maxAttempts is how many times in all resume lets an item's call be sent. A
-// lookup that keeps finding nothing may be wrong, and each call it lets
-// through can make one more object. Three still finishes a run that crashed
-// before its call and then again while resuming, before a call was sent.
+// maxAttempts caps update attempts even when lookups keep missing the change.
 const maxAttempts = 3
 
 // journalRow is one row of the journal.
@@ -116,8 +113,8 @@ func newExecutor(e *Engine, info *RunInfo, p review.Plan, jsm *discover.Snapshot
 // run and writes its record. An item whose call is sending or unknown, which
 // only a resumed run has, is looked up first. Before each item it checks
 // whether the operator asked the run to stop, and if so stops there, paused.
-// It stops interrupted at a call cut short by ctx, and at a lookup that
-// found nothing too soon after the call to be believed.
+// It stops interrupted at a call cut short by ctx, or when a lookup miss
+// leaves the item waiting for reconciliation.
 //
 // The bookkeeping after a call uses a context that ctx ending does not
 // cancel: a call that was answered is recorded whatever happens to the
@@ -332,8 +329,11 @@ func (x *executor) take(ctx, db context.Context, it review.Item, prev *journalRo
 		}
 	case callErr == nil:
 		row.state = review.Done
-		if out.JSM != nil {
+		switch {
+		case out.JSM != nil:
 			row.jsm = out.JSM
+		case it.Action == review.Create && it.PagerDuty != nil:
+			x.unnamed(ctx, step, it, deps, &row)
 		}
 	default:
 		x.failed(ctx, step, it, deps, callErr, &row)
@@ -399,12 +399,9 @@ func (x *executor) send(ctx context.Context, row journalRow, it review.Item, pre
 	return nil
 }
 
-// settle looks up an item whose call is sending or unknown, when a run is
-// resumed. Found is done, with the object it found. Not found is proven not
-// to have taken effect only once the attempt is resendAfter old; then the
-// call is sent again (AGENTS.md rule 6), unless it was sent maxAttempts
-// times already, which fails it for the operator to check. Anything else
-// leaves it unknown, for the next resume.
+// settle looks up a call whose result has not been settled. A create may
+// have succeeded even after repeated lookup misses, so it stays unresolved
+// until it can be mapped. Only updates are eligible for a resend.
 //
 // The age is measured from the attempt's started_at, which is written before
 // the call and never changed, and the count is the journal's attempt number,
@@ -422,7 +419,7 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 	now := x.e.now()
 	notFound := err == nil && found.Outcome == LookupNotFound
 	believed := row.started.Add(resendAfter)
-	if notFound && !now.Before(believed) && row.attempt < maxAttempts {
+	if it.Action == review.Update && notFound && !now.Before(believed) && row.attempt < maxAttempts {
 		return x.take(ctx, db, it, &row)
 	}
 	before := row.state
@@ -432,7 +429,11 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 	case err == nil && found.Outcome == LookupFound && found.JSM != nil:
 		row.state, row.jsm = review.Done, found.JSM
 		row.msgs = []messages.Message{{Class: messages.Information, Code: "outcome_found",
-			Text: fmt.Sprintf("JSM did not answer the %s call, but a lookup when the run was resumed found that it took effect.", it.Action)}}
+			Text: fmt.Sprintf("A lookup when the run was resumed identified the JSM object for the %s call.", it.Action)}}
+	case notFound && it.Action == review.Create:
+		row.state, row.jsm, stop = review.Unknown, nil, true
+		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "create_unresolved",
+			Text: "The lookup did not find the JSM object. The create may have succeeded, so resume will only look it up. Check JSM using the recorded request ID if available, then resume again."}}
 	case notFound && now.Before(believed):
 		row.state, row.jsm, stop = review.Unknown, nil, true
 		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "lookup_too_soon",
@@ -468,10 +469,36 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 // messageTime is t as a message names it: in UTC, to the second.
 func messageTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
-// failed records a call that returned an error. An unknown outcome is looked
-// up once, at once: found means done. Anything else leaves it unknown, and
-// it is never sent again within the run, because a JSM write can take a
-// moment to show, so a lookup right after the call can miss what it made.
+// lookUp returns the object a step can identify as the result of the call.
+func (x *executor) lookUp(ctx context.Context, step Step, it review.Item, deps Results) (*review.Ref, error) {
+	found, err := step.Lookup(ctx, it, deps, x.jsm)
+	if err != nil || found.Outcome != LookupFound {
+		return nil, err
+	}
+	return found.JSM, nil
+}
+
+// unnamed reconciles a successful create whose response had no object ID.
+// Completing it without a mapping would let the next plan create it again.
+func (x *executor) unnamed(ctx context.Context, step Step, it review.Item, deps Results, row *journalRow) {
+	found, err := x.lookUp(ctx, step, it, deps)
+	if found != nil {
+		row.jsm = found
+		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "object_found",
+			Text: "The create call gave no JSM object, but a lookup found the one it made."})
+		return
+	}
+	row.state, row.jsm = review.Unknown, nil
+	text := "The create succeeded without a JSM object ID. Check JSM and resume to look up the object."
+	if err != nil {
+		text += fmt.Sprintf(" The lookup failed: %v.", err)
+	}
+	row.msgs = append(row.msgs, messages.Message{Class: messages.ManualTask, Code: "object_unidentified", Text: text})
+}
+
+// failed records a call that returned an error. An unknown outcome gets one
+// immediate lookup, since a write can take time to show. If no object is
+// identified the item stays unknown for resume.
 func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps Results, callErr error, row *journalRow) {
 	class := messages.Classify(callErr, messages.Write)
 	if class != messages.ManualTask {
@@ -480,17 +507,19 @@ func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps R
 			Text: fmt.Sprintf("The %s call failed: %v", it.Action, callErr)})
 		return
 	}
-	found, lookErr := step.Lookup(ctx, it, deps, x.jsm)
-	if lookErr == nil && found.Outcome == LookupFound && found.JSM != nil {
-		row.state, row.jsm = review.Done, found.JSM
+	found, lookErr := x.lookUp(ctx, step, it, deps)
+	if found != nil {
+		row.state, row.jsm = review.Done, found
 		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "outcome_found",
 			Text: fmt.Sprintf("JSM did not answer the %s call (%v), but a lookup found that it took effect.", it.Action, callErr)})
 		return
 	}
 	row.state, row.jsm = review.Unknown, nil
-	text := fmt.Sprintf("It is not known whether the %s call took effect: %v. resume looks it up again and sends it "+
-		"again only if a lookup %d minutes after the call finds it did not; until then, check it in JSM.",
-		it.Action, callErr, int(resendAfter/time.Minute))
+	text := fmt.Sprintf("It is not known whether the %s call took effect: %v. Check it in JSM. Resume looks it up again.", it.Action, callErr)
+	if it.Action == review.Update {
+		text += fmt.Sprintf(" Resume may retry the update if a lookup at least %d minutes later finds it did not take effect.",
+			int(resendAfter/time.Minute))
+	}
 	if lookErr != nil {
 		text += fmt.Sprintf(" The lookup failed too: %v.", lookErr)
 	}

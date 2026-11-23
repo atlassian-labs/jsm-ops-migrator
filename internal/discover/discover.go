@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,31 @@ type Reader interface {
 	// could not read all of it, such as a list PagerDuty answered only in
 	// part (pd.Coverage), so an incomplete list never looks complete.
 	Read(ctx context.Context, side review.Side, w *Writer) error
+}
+
+// Versioned is a Reader whose part of a read has a format that can change.
+// Each read records the version of every reader that made it, and only
+// readers of the same names and versions reuse it, so a step that changes
+// what it writes bumps its version, and a read in the older format is never
+// decoded as the newer one. A Reader without it has version 0.
+type Versioned interface {
+	Reader
+	ReadVersion() int
+}
+
+// Coverage names the readers of a read and the version of each, in a form
+// two reads can be compared by: "teams@0,users@1".
+func Coverage(readers []Reader) string {
+	parts := make([]string, len(readers))
+	for i, r := range readers {
+		version := 0
+		if v, ok := r.(Versioned); ok {
+			version = v.ReadVersion()
+		}
+		parts[i] = fmt.Sprintf("%s@%d", r.Name(), version)
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, ",")
 }
 
 // nameRe is a step's name and an object's kind: they become part of message
@@ -101,6 +127,7 @@ type Snapshot struct {
 	at       time.Time
 	complete bool
 	problems []messages.Message
+	readers  sql.NullString
 }
 
 // ID is the read's row in state.db.
@@ -114,6 +141,12 @@ func (s *Snapshot) At() time.Time { return s.at }
 
 // Complete reports whether every step read all of its part.
 func (s *Snapshot) Complete() bool { return s.complete }
+
+// MatchesReaders reports whether the same steps wrote this snapshot in the
+// same formats. A snapshot made before coverage was recorded cannot match.
+func (s *Snapshot) MatchesReaders(readers []Reader) bool {
+	return s.readers.Valid && s.readers.String == Coverage(readers)
+}
 
 // Problems are the messages of the steps whose read failed: a blocker for a
 // step whose part is incomplete, and information for one whose part the
@@ -197,7 +230,8 @@ func problemsRef(read int64) store.FieldRef {
 //
 // Read returns an error only when ctx ends, when a reader's name is not
 // snake_case, or when the read cannot be saved. A read cut short is never
-// finished, so no plan uses it.
+// finished, so no plan uses it. The read records the readers' Coverage, so
+// only the same readers reuse it.
 func Read(ctx context.Context, st *store.Store, side review.Side, account review.MigrationAccount, readers []Reader, now func() time.Time) (*Snapshot, error) {
 	if side != review.PagerDuty && side != review.JSM {
 		return nil, fmt.Errorf("discover: unknown side %s", review.Quote(string(side)))
@@ -214,8 +248,9 @@ func Read(ctx context.Context, st *store.Store, side review.Side, account review
 		return nil, err
 	}
 	s := &Snapshot{st: st, side: side, account: account, at: now().UTC(), complete: true}
-	res, err := st.DB().ExecContext(ctx, `INSERT INTO snapshot_reads(side, started_at) VALUES (?, ?)`,
-		string(side), formatTime(s.at))
+	s.readers = sql.NullString{String: Coverage(readers), Valid: true}
+	res, err := st.DB().ExecContext(ctx, `INSERT INTO snapshot_reads(side, started_at, readers) VALUES (?, ?, ?)`,
+		string(side), formatTime(s.at), s.readers.String)
 	if err != nil {
 		return nil, err
 	}
@@ -315,17 +350,20 @@ func (s *Snapshot) save(ctx context.Context, w *Writer) error {
 	})
 }
 
-// Latest returns the latest finished read of side, or nil when there is
-// none.
-func Latest(ctx context.Context, st *store.Store, side review.Side) (*Snapshot, error) {
-	return latestWhere(ctx, st, side, "")
+// Latest returns the latest finished read of side that readers made, or nil
+// when there is none. A read other readers made, or older versions of them,
+// is never returned: it holds nothing of a step that did not read, which
+// would pass for a side without that step's objects.
+func Latest(ctx context.Context, st *store.Store, side review.Side, readers []Reader) (*Snapshot, error) {
+	return latestWhere(ctx, st, side, readers, "")
 }
 
-func latestWhere(ctx context.Context, st *store.Store, side review.Side, and string) (*Snapshot, error) {
+func latestWhere(ctx context.Context, st *store.Store, side review.Side, readers []Reader, and string) (*Snapshot, error) {
 	var id int64
 	err := st.DB().QueryRowContext(ctx,
-		`SELECT id FROM snapshot_reads WHERE side = ? AND account IS NOT NULL AND finished_at IS NOT NULL `+and+` ORDER BY id DESC LIMIT 1`,
-		string(side)).Scan(&id)
+		`SELECT id FROM snapshot_reads WHERE side = ? AND readers = ? AND account IS NOT NULL AND finished_at IS NOT NULL `+
+			and+` ORDER BY id DESC LIMIT 1`,
+		string(side), Coverage(readers)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -335,10 +373,10 @@ func latestWhere(ctx context.Context, st *store.Store, side review.Side, and str
 	return Open(ctx, st, id)
 }
 
-// LatestComplete returns the latest finished read of side in which every
-// step read all of its part, or nil when there is none.
-func LatestComplete(ctx context.Context, st *store.Store, side review.Side) (*Snapshot, error) {
-	return latestWhere(ctx, st, side, `AND complete = 1`)
+// LatestComplete returns the latest finished read of side that readers made
+// and in which every one read all of its part, or nil when there is none.
+func LatestComplete(ctx context.Context, st *store.Store, side review.Side, readers []Reader) (*Snapshot, error) {
+	return latestWhere(ctx, st, side, readers, `AND complete = 1`)
 }
 
 // ErrNoRead means no finished read has the ID asked for.
@@ -350,8 +388,8 @@ func Open(ctx context.Context, st *store.Store, id int64) (*Snapshot, error) {
 	var side, at string
 	var sealed, identity []byte
 	err := st.DB().QueryRowContext(ctx,
-		`SELECT side, started_at, complete, problems, account FROM snapshot_reads WHERE id = ? AND finished_at IS NOT NULL`,
-		id).Scan(&side, &at, &s.complete, &sealed, &identity)
+		`SELECT side, started_at, complete, problems, account, readers FROM snapshot_reads WHERE id = ? AND finished_at IS NOT NULL`,
+		id).Scan(&side, &at, &s.complete, &sealed, &identity, &s.readers)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %d", ErrNoRead, id)
 	}

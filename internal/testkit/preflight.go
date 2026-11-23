@@ -20,6 +20,9 @@ type FakeAPIs struct {
 
 	PagerDutyAccount string
 	AbilitiesErr     error
+	// AccountHostErr makes the users list that identifies the PagerDuty
+	// account fail, after /abilities worked.
+	AccountHostErr error
 	// Sites maps a site to its tenant; an unknown site is httperr.ErrNotFound.
 	Sites     map[string]preflight.Tenant
 	TenantErr error
@@ -68,7 +71,12 @@ type fakeClients struct {
 
 func accepted(want, got string) bool { return want == "" || want == got }
 
-func (c fakeClients) AccountHost(context.Context) (string, error) { return c.f.PagerDutyAccount, nil }
+func (c fakeClients) AccountHost(context.Context) (string, error) {
+	if c.f.AccountHostErr != nil {
+		return "", c.f.AccountHostErr
+	}
+	return c.f.PagerDutyAccount, nil
+}
 
 func (c fakeClients) Abilities(context.Context) ([]string, error) {
 	c.f.record("pagerduty abilities")

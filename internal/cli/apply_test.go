@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -536,5 +537,149 @@ func TestCredentialRotationKeepsTheWorkspaceBinding(t *testing.T) {
 	}
 	if r := s.run("apply", "--jsm-plan", "premium", "--accept-file", s.acceptanceFile("accepted")); r.code != ExitOK {
 		t.Fatal(r.stderr)
+	}
+}
+
+// Third review: apply went on when the check of the Atlassian email and API
+// token could not run, so it wrote with a token nothing had checked. It stops
+// before the confirmation is used, so the same file works once the check can
+// run.
+func TestApplyNeedsTheChecksItWritesWithToHaveRun(t *testing.T) {
+	s, step := planned(t)
+	file := s.acceptanceFile("Casey left the company")
+	s.apis.AccessErr = fmt.Errorf("GET /v1/teams: %w", httperr.ErrUnavailable)
+	r := s.run("apply", "--jsm-plan", "premium", "--accept-file", file)
+	if r.code != ExitError || !strings.Contains(r.stderr, "Atlassian email and API token") || !strings.Contains(r.stderr, "nothing was written") {
+		t.Errorf("exit %d, stderr %q", r.code, r.stderr)
+	}
+	if len(step.calls) != 0 {
+		t.Errorf("calls with an unchecked token: %v", step.calls)
+	}
+	for _, p := range []string{s.artifact("plans", "v1", review.ConfirmationFile), s.artifact("runs")} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	s.apis.AccessErr = nil
+	if r := s.run("apply", "--jsm-plan", "premium", "--accept-file", file); r.code != ExitOK || len(step.calls) != 2 {
+		t.Errorf("once the check runs: exit %d, %q, calls %v", r.code, r.stderr, step.calls)
+	}
+}
+
+// Third review: a credential pasted into a reason has no label for a pattern
+// to find, so confirmation.md kept the active API token as typed.
+func TestAReasonNeverKeepsACredential(t *testing.T) {
+	s, _ := planned(t)
+	token := "atl-canary-0123456789" // the Atlassian API token planned() sets
+	if credentials.RedactText(token) != token {
+		t.Fatal("the patterns find the token; the test needs one they do not")
+	}
+	r := s.run("apply", "--jsm-plan", "premium", "--accept-file", s.acceptanceFile("approved with "+token))
+	if r.code != ExitOK {
+		t.Fatalf("exit %d, %q", r.code, r.stderr)
+	}
+	conf, err := os.ReadFile(s.artifact("plans", "v1", review.ConfirmationFile))
+	// Markdown shows the brackets of [redacted] escaped.
+	if err != nil || bytes.Contains(conf, []byte(token)) || !bytes.Contains(conf, []byte(`approved with \[redacted\]`)) {
+		t.Errorf("confirmation.md: %v, holds the token: %v", err, bytes.Contains(conf, []byte(token)))
+	}
+	noLeaks(t, s.dir, r)
+}
+
+// Third review: when the run record could not be written, apply reported
+// every call it had made as not taken yet, and named a record that was not
+// there. It reports what the journal says, and no record.
+func TestApplyReportsItsCallsWhenTheRecordCannotBeWritten(t *testing.T) {
+	for _, output := range []string{"json", "text"} {
+		t.Run(output, func(t *testing.T) {
+			s, step := planned(t)
+			if err := os.WriteFile(s.artifact("runs"), []byte("in the way"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := s.run("apply", "--jsm-plan", "premium", "--accept-file", s.acceptanceFile("ok"), "--output", output)
+			if r.code != ExitError || len(step.calls) != 2 {
+				t.Fatalf("exit %d, calls %v, stderr %q", r.code, step.calls, r.stderr)
+			}
+			if output == "text" {
+				if !strings.Contains(r.stdout, "2 of 2 items done") || strings.Contains(r.stdout, "Record:") ||
+					!strings.Contains(r.stdout, "could not be written") {
+					t.Errorf("stdout:\n%s", r.stdout)
+				}
+				return
+			}
+			var doc struct {
+				Run struct {
+					Counts map[string]int `json:"counts"`
+					Record *string        `json:"record"`
+				} `json:"run"`
+			}
+			if err := decodeOne(r.stdout, &doc); err != nil {
+				t.Fatalf("%v\n%s", err, r.stdout)
+			}
+			if doc.Run.Counts["done"] != 2 || doc.Run.Counts["pending"] != 0 || doc.Run.Record != nil {
+				t.Errorf("run %+v, record %v", doc.Run.Counts, doc.Run.Record)
+			}
+		})
+	}
+}
+
+// When the journal cannot be read, nothing is known about the items: the
+// counts are not given, rather than given as all not taken yet.
+func TestARunWithoutItsJournalHasNoCounts(t *testing.T) {
+	out := runResult(nil, engine.RunResult{Info: engine.RunInfo{ID: "20261117-090000-abcdef", PlanVersion: 1, Total: 2,
+		State: review.Running, Record: filepath.Join("runs", "20261117-090000-abcdef", review.RunMarkdownFile)}})
+	data, err := json.Marshal(out)
+	if err != nil || out.Counts != nil || out.Record != "" || !bytes.Contains(data, []byte(`"counts":null`)) {
+		t.Errorf("%v %s", err, data)
+	}
+	var b strings.Builder
+	if err := writeRun(&b, out); err != nil || !strings.Contains(b.String(), "not known") || strings.Contains(b.String(), "Record:") {
+		t.Errorf("%v\n%s", err, b.String())
+	}
+	if line := runSummary(out); len(line) == 0 || !strings.Contains(line[0], "not known") {
+		t.Errorf("summary %v", line)
+	}
+}
+
+// Third review: a replan kept a version whose acceptance-template.yaml was
+// gone, and apply kept pointing at the missing file.
+func TestApplyNeverPointsAtAMissingTemplate(t *testing.T) {
+	s, step := planned(t)
+	if err := os.Remove(s.artifact("plans", "v1", review.AcceptanceTemplateFile)); err != nil {
+		t.Fatal(err)
+	}
+	if r := s.run("apply", "--jsm-plan", "premium"); r.code != messages.ExitValidationFailed || !strings.Contains(r.stderr, "run plan again") {
+		t.Errorf("apply without the template: exit %d, %q", r.code, r.stderr)
+	}
+	if r := s.run("plan", "--jsm-plan", "premium"); r.code != ExitOK || !strings.Contains(r.stdout, "Plan v2:") {
+		t.Fatalf("replan: exit %d\n%s", r.code, r.stdout)
+	}
+	r := s.run("apply", "--jsm-plan", "premium")
+	if r.code != ExitAwaitingInput || !strings.Contains(r.stderr, filepath.Join("plans", "v2", review.AcceptanceTemplateFile)) {
+		t.Errorf("apply after the replan: exit %d, %q", r.code, r.stderr)
+	}
+	if _, err := os.Stat(s.artifact("plans", "v2", review.AcceptanceTemplateFile)); err != nil {
+		t.Error(err)
+	}
+	if len(step.calls) != 0 {
+		t.Errorf("calls %v", step.calls)
+	}
+}
+
+// Third review: plan --only reused the other side's latest read whatever
+// steps had made it, so a build with a new step planned from a JSM read that
+// never looked for that step's objects.
+func TestPlanOnlyReusesAReadOfTheSameSteps(t *testing.T) {
+	s, _ := planned(t)
+	s.steps = append(s.steps, engine.Placeholders()...)
+	r := s.run("plan", "--jsm-plan", "premium", "--only", "pagerduty")
+	if r.code != ExitError || !strings.Contains(r.stderr, "no JSM read to build on yet, as only one made by this build's steps") {
+		t.Errorf("plan --only after a new step: exit %d, %q\n%s", r.code, r.stderr, r.stdout)
+	}
+	if r := s.run("plan", "--jsm-plan", "premium"); r.code != ExitOK {
+		t.Fatalf("plan: exit %d, %q", r.code, r.stderr)
+	}
+	if r := s.run("plan", "--jsm-plan", "premium", "--only", "pagerduty"); r.code != ExitOK || !strings.Contains(r.stdout, "Using the JSM read of") {
+		t.Errorf("plan --only with a read of the same steps: exit %d, %q\n%s", r.code, r.stderr, r.stdout)
 	}
 }

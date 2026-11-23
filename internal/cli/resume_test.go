@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
@@ -149,9 +151,8 @@ func TestACtrlCBeforeTheRunStopsApply(t *testing.T) {
 	}
 }
 
-// The second Ctrl+C cancels the call in flight, which resume looks up
-// before it sends anything: unknown waits, and not found is sent again once
-// the call is old enough for the lookup to be believed.
+// The second Ctrl+C cancels the call in flight. Resume looks up the create
+// until it can map the object, even when the lookup misses after a delay.
 func TestTheSecondCtrlCLeavesTheCallForResume(t *testing.T) {
 	s, step := planned(t)
 	step.during = func(ctx context.Context, key string) error {
@@ -176,19 +177,38 @@ func TestTheSecondCtrlCLeavesTheCallForResume(t *testing.T) {
 	}
 	step.found["teams/PT1"] = engine.Lookup{Outcome: engine.LookupNotFound}
 	r = s.run("resume", "--jsm-plan", "premium")
-	if r.code != messages.ExitPartial || !strings.Contains(r.stderr, "a lookup this soon after a call can miss what it made") ||
-		!strings.Contains(r.stderr, "Resume it after") {
+	if r.code != messages.ExitPartial || !strings.Contains(r.stderr, "The create may have succeeded") {
 		t.Fatalf("resume right after the call: exit %d, stderr %q\n%s", r.code, r.stderr, r.stdout)
 	}
 	if strings.Join(step.calls, " ") != "teams/PT1 teams/PT2" {
-		t.Errorf("calls %v: not found right after the call is not believed", step.calls)
+		t.Errorf("calls %v: the create was sent again", step.calls)
 	}
 	s.wait(time.Hour)
-	if r := s.run("resume", "--jsm-plan", "premium"); r.code != ExitOK {
-		t.Fatalf("resume after not found: exit %d, stderr %q\n%s", r.code, r.stderr, r.stdout)
+	if r := s.run("resume", "--jsm-plan", "premium"); r.code != messages.ExitPartial {
+		t.Fatalf("resume after another lookup miss: exit %d, %s", r.code, r.stderr)
 	}
-	if strings.Join(step.calls, " ") != "teams/PT1 teams/PT2 teams/PT1" {
-		t.Errorf("calls %v: sent again once proven not to have taken effect", step.calls)
+	step.found["teams/PT1"] = engine.Lookup{Outcome: engine.LookupFound, JSM: &review.Ref{Type: "team", ID: "reconciled-team"}}
+	if r := s.run("resume", "--jsm-plan", "premium"); r.code != ExitOK {
+		t.Fatalf("resume after lookup found the object: exit %d, stderr %q\n%s", r.code, r.stderr, r.stdout)
+	}
+	if strings.Join(step.calls, " ") != "teams/PT1 teams/PT2" {
+		t.Errorf("calls %v: each create should be sent once", step.calls)
+	}
+}
+
+func TestResumeWaitsForRequiredPreflight(t *testing.T) {
+	s, step := paused(t)
+	s.apis.AccessErr = fmt.Errorf("GET /v1/teams: %w", httperr.ErrUnavailable)
+	if r := s.run("resume", "--jsm-plan", "premium"); r.code != ExitError ||
+		!strings.Contains(r.stderr, "nothing was written") || !strings.Contains(r.stderr, "Atlassian email and API token") {
+		t.Errorf("resume: exit %d, stderr %q", r.code, r.stderr)
+	}
+	if strings.Join(step.calls, " ") != "teams/PT1" {
+		t.Errorf("calls after unavailable preflight: %v", step.calls)
+	}
+	s.apis.AccessErr = nil
+	if r := s.run("resume", "--jsm-plan", "premium"); r.code != ExitOK || strings.Join(step.calls, " ") != "teams/PT1 teams/PT2" {
+		t.Errorf("resume after preflight recovered: exit %d, stderr %q, calls %v", r.code, r.stderr, step.calls)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 )
@@ -296,5 +297,22 @@ func TestWriteTextKeepsEveryMessage(t *testing.T) {
 		"  error    x                    an unknown class\n"
 	if b.String() != want {
 		t.Errorf("got\n%q\nwant\n%q", b.String(), want)
+	}
+}
+
+// A credential typed bare has no label for a pattern to find; CleanWith
+// removes the ones its redactor knows, and the patterns' finds as Clean does.
+func TestCleanWithRemovesKnownSecrets(t *testing.T) {
+	const token = "Zq7vR2mK9pL4xW8n"
+	r := credentials.NewRedactor(credentials.NewSecret(token))
+	in := "approved with " + token + "\non +14155550123"
+	if got := messages.Clean(in); !strings.Contains(got, token) || strings.Contains(got, "4155550123") {
+		t.Errorf("Clean = %q", got)
+	}
+	if got := messages.CleanWith(r, in); strings.Contains(got, token) || strings.Contains(got, "4155550123") || strings.Contains(got, "\n") {
+		t.Errorf("CleanWith = %q", got)
+	}
+	if messages.CleanWith(nil, in) != messages.Clean(in) {
+		t.Error("CleanWith(nil) is not Clean")
 	}
 }

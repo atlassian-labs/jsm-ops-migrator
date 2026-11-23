@@ -235,8 +235,16 @@ func (r *run) pagerDutyKey() (Status, string) {
 	_, err := r.c.PagerDuty.Abilities(r.ctx)
 	switch {
 	case err == nil:
+		// The users list identifies the account every read is bound to, so a
+		// key PagerDuty refuses it to fails, as one refused /abilities does:
+		// nothing can be migrated with it.
 		account, err := r.c.PagerDuty.AccountHost(r.ctx)
-		if err != nil {
+		switch {
+		case errors.Is(err, httperr.ErrUnauthorized):
+			return Failed, "PagerDuty rejected the key when it listed the account's users"
+		case errors.Is(err, httperr.ErrForbidden):
+			return Failed, "PagerDuty does not allow this key to list the account's users, which is how jsm-ops-migrator identifies the account"
+		case err != nil:
 			return notChecked(err)
 		}
 		r.report.PagerDutyAccount = account

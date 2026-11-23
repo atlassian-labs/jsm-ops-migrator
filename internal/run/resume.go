@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/discover"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 )
 
@@ -61,11 +62,9 @@ func (e *Engine) CheckResumeSteps(r *Resumable) error {
 
 // Resume continues the unfinished run on its own plan version, from the
 // first item that has no final state. Before an item whose call is sending
-// or unknown is taken further, its step looks it up: found is done, and only
-// not found sends the call again, once the attempt is old enough for the
-// lookup to be believed and at most maxAttempts times in all. A lookup that
-// cannot tell leaves the item unknown and the run unfinished, for the next
-// resume.
+// or unknown is taken further, its step looks it up. A create needs a
+// recordable match to complete. An update can also be sent again after a
+// lookup miss once the attempt is old enough, up to maxAttempts in all.
 //
 // A run marked running is one whose command ended without marking it, such
 // as in a crash: the caller holds the workspace lock, so no other command is
@@ -91,23 +90,27 @@ func (e *Engine) Resume(ctx context.Context) (RunResult, error) {
 	info := r.Run
 	jsm, err := discover.Open(ctx, e.Store, info.JSMRead)
 	if err != nil {
-		return RunResult{Info: info}, err
+		return e.stoppedRun(ctx, info, r.Version.Plan, err)
+	}
+	if r.Version.Calls != 0 && !jsm.MatchesReaders(e.readers()) {
+		err := messages.ValidationFailed(fmt.Errorf("run %s uses a JSM snapshot from different steps or read formats; resume with the build that started it", info.ID))
+		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
 	if err := review.WriteConfirmation(e.Workspace, r.Confirmation, r.Version.Plan); err != nil &&
 		!errors.Is(err, review.ErrAlreadyConfirmed) {
-		return RunResult{Info: info}, err
+		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
 	j, err := e.readJournal(ctx, info.ID)
 	if err != nil {
-		return RunResult{Info: info}, err
+		return e.stoppedRun(ctx, info, r.Version.Plan, err)
+	}
+	if _, err := e.Store.DB().ExecContext(ctx, `UPDATE runs SET state = ? WHERE id = ?`, string(review.Running), info.ID); err != nil {
+		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
 	info.State = review.Running
-	if _, err := e.Store.DB().ExecContext(ctx, `UPDATE runs SET state = ? WHERE id = ?`, string(info.State), info.ID); err != nil {
-		return RunResult{Info: info}, err
-	}
 	x := newExecutor(e, &info, r.Version.Plan, jsm, j)
 	if _, err := x.writeRecord(ctx, info); err != nil {
-		return RunResult{Info: info}, err
+		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
 	return e.execute(ctx, x)
 }

@@ -128,8 +128,13 @@ func (e *Engine) CheckAccounts(v *PlanVersion) error {
 // RunResult is what Apply or Resume did.
 type RunResult struct {
 	Info RunInfo
-	// Record is the run record as it was last written.
+	// Record is the run record, rebuilt from the journal, which has every
+	// result, so it says what the run did even when Apply fails once the run
+	// exists. It is the zero Run when the journal could not be read either.
 	Record review.Run
+	// RecordWritten means Record's files are on disk. When it is false, the
+	// files there, if any, are older than Record.
+	RecordWritten bool
 }
 
 // Apply confirms v with c and runs it: every item in the plan's order, each
@@ -140,7 +145,8 @@ type RunResult struct {
 // are taken as planned, each step deciding from the results of the items it
 // depends on. So a run whose items did not all end done is a result, not an
 // error. Apply returns an error only when the run cannot go on: state.db or
-// the record cannot be written.
+// the record cannot be written. Once the run exists, its result includes
+// the journaled outcomes even on error.
 //
 // The run stops before its next item when Interrupted is closed or pause
 // asks it to, and is marked paused. When ctx ends, it stops after the call
@@ -155,6 +161,9 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 	if err := c.Check(v.Plan, v.Hash); err != nil {
 		return RunResult{}, messages.ValidationFailed(err)
 	}
+	// What the operator typed is cleaned once, and the same confirmation is
+	// sealed and written, so neither keeps what the other leaves out.
+	c = e.cleaned(c)
 	jsm, err := e.lookupRead(ctx, v)
 	if err != nil {
 		return RunResult{}, err
@@ -169,16 +178,17 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 		return RunResult{}, err
 	}
 	// From here on the run exists: a failure leaves it unfinished, for
-	// resume, which rebuilds what is missing from state.db.
+	// resume, which rebuilds what is missing from state.db. What the run did
+	// so far is in its journal, so a failure still reports it.
 	if err := review.WriteConfirmation(e.Workspace, c, v.Plan); err != nil {
-		return RunResult{Info: info}, err
+		return e.stoppedRun(ctx, info, v.Plan, err)
 	}
 	// A fresh run has a new ID and cannot have a request until it is
 	// advertised, so one here is left over. Resume keeps the run's ID and
 	// leaves the request alone: Announce removed the one left over before
 	// resume's checks, so one there now was asked during them.
 	if err := e.Workspace.RemoveFile(PauseRequestFile); err != nil {
-		return RunResult{Info: info}, err
+		return e.stoppedRun(ctx, info, v.Plan, err)
 	}
 	return e.execute(ctx, newExecutor(e, &info, v.Plan, jsm, journal{}))
 }
@@ -189,43 +199,64 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 func (e *Engine) execute(ctx context.Context, x *executor) (RunResult, error) {
 	info := x.info
 	if err := writeActive(e.Workspace, ActiveRun{RunID: info.ID, PlanVersion: info.PlanVersion, StartedAt: info.StartedAt}); err != nil {
-		return RunResult{Info: *info}, err
+		return e.stoppedRun(ctx, *info, x.plan, err)
 	}
 	record, err := x.run(ctx)
 	if err != nil {
-		return RunResult{Info: *info}, err
+		return e.stoppedRun(ctx, *info, x.plan, err)
 	}
+	res := RunResult{Info: *info, Record: record, RecordWritten: true}
 	if err := e.Workspace.RemoveFile(ActiveRunFile); err != nil {
-		return RunResult{Info: *info, Record: record}, err
+		return res, err
 	}
-	return RunResult{Info: *info, Record: record}, nil
+	return res, nil
 }
 
-// lookupRead is the JSM read a run's lookups compare with: the latest
-// complete one, which is the plan's own or one taken since by a plan that
-// gave the same plan. Lookup counts an object that matches an item but is
-// not in this read as made by the run, so the newest read before the run
-// leaves the fewest objects the customer made to be taken for ours.
+// stoppedRun reports the journaled outcomes when the run cannot continue.
+func (e *Engine) stoppedRun(ctx context.Context, info RunInfo, p review.Plan, cause error) (RunResult, error) {
+	record, err := e.record(context.WithoutCancel(ctx), info, p)
+	if err != nil {
+		return RunResult{Info: info}, errors.Join(cause, fmt.Errorf("reading run journal: %w", err))
+	}
+	return RunResult{Info: info, Record: record}, cause
+}
+
+// lookupRead validates the plan's JSM read before using it or a newer complete
+// read of the same formats. A newer baseline avoids attributing objects created
+// between planning and applying to the run.
 func (e *Engine) lookupRead(ctx context.Context, v *PlanVersion) (*discover.Snapshot, error) {
-	latest, err := discover.LatestComplete(ctx, e.Store, review.JSM)
+	original, err := discover.Open(ctx, e.Store, v.JSMRead)
+	if err != nil || v.Calls == 0 {
+		return original, err
+	}
+	readers := e.readers()
+	if !original.MatchesReaders(readers) {
+		return nil, messages.ValidationFailed(fmt.Errorf("plan v%d uses a JSM snapshot from different steps or read formats; run plan again", v.Version))
+	}
+	latest, err := discover.LatestComplete(ctx, e.Store, review.JSM, readers)
 	if err != nil {
 		return nil, err
 	}
 	if latest != nil && latest.ID() >= v.JSMRead {
 		return latest, nil
 	}
-	return discover.Open(ctx, e.Store, v.JSMRead)
+	return original, nil
+}
+
+// cleaned is c with each reason as every report writes it, also without the
+// invocation's credentials, so a phone number or a token in a reason is never
+// stored, sealed or not, nor written to confirmation.md.
+func (e *Engine) cleaned(c review.Confirmation) review.Confirmation {
+	c.Accepted = slices.Clone(c.Accepted)
+	for i := range c.Accepted {
+		c.Accepted[i].Reason = messages.CleanWith(e.Redactor, c.Accepted[i].Reason)
+	}
+	return c
 }
 
 // confirm records the confirmation and the run it starts in one
 // transaction, so a run never exists without the confirmation it ran under.
 func (e *Engine) confirm(ctx context.Context, info RunInfo, c review.Confirmation) error {
-	// What the operator typed is kept as confirmation.md shows it, so a
-	// phone number in a reason is never stored, sealed or not.
-	c.Accepted = slices.Clone(c.Accepted)
-	for i := range c.Accepted {
-		c.Accepted[i].Reason = messages.Clean(c.Accepted[i].Reason)
-	}
 	data, err := json.Marshal(c)
 	if err != nil {
 		return err

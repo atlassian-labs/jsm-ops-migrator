@@ -121,3 +121,15 @@ func TestCheckNewPassphrase(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// A set's Redactor removes each of its secrets, wherever it appears.
+func TestSetRedactorRemovesItsSecrets(t *testing.T) {
+	s := credentials.Set{}.
+		With(credentials.PagerDutyKey, "pdkeyQ3w8Z5x").
+		With(credentials.AtlassianToken, "atltokR7m2K9").
+		With(credentials.OrgAPIKey, "orgkeyT4n6B1")
+	got := s.Redactor().String("pdkeyQ3w8Z5x atltokR7m2K9 orgkeyT4n6B1 kept")
+	if got != "[redacted] [redacted] [redacted] kept" {
+		t.Errorf("String = %q", got)
+	}
+}

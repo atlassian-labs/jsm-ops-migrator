@@ -90,6 +90,16 @@ func TestEachCheckResult(t *testing.T) {
 			preflight.PagerDutyKey, preflight.Failed, "does not allow"},
 		{"pagerduty unreachable", func(f *testkit.FakeAPIs, _ *preflight.Input) { f.AbilitiesErr = unavailable },
 			preflight.PagerDutyKey, preflight.NotChecked, "dial tcp"},
+		// Third review: once /abilities worked, a users list PagerDuty refused
+		// was a check that could not run, so login exited 0 without the key.
+		{"pagerduty users list forbidden", func(f *testkit.FakeAPIs, _ *preflight.Input) {
+			f.AccountHostErr = fmt.Errorf("GET /users: 403: %w", httperr.ErrForbidden)
+		}, preflight.PagerDutyKey, preflight.Failed, "does not allow this key to list the account's users"},
+		{"pagerduty users list rejected", func(f *testkit.FakeAPIs, _ *preflight.Input) {
+			f.AccountHostErr = fmt.Errorf("GET /users: 401: %w", httperr.ErrUnauthorized)
+		}, preflight.PagerDutyKey, preflight.Failed, "rejected the key"},
+		{"pagerduty users list unreachable", func(f *testkit.FakeAPIs, _ *preflight.Input) { f.AccountHostErr = unavailable },
+			preflight.PagerDutyKey, preflight.NotChecked, "dial tcp"},
 		{"pagerduty key from the environment", func(_ *testkit.FakeAPIs, in *preflight.Input) {
 			in.Sources = map[credentials.Kind]string{credentials.PagerDutyKey: "from JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY"}
 		}, preflight.PagerDutyKey, preflight.OK, "works (from JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY)"},

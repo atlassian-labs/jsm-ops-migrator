@@ -75,6 +75,11 @@ func (s Set) Missing(kinds ...Kind) []Kind {
 	return out
 }
 
+// Redactor returns a Redactor that also removes the set's secrets wherever
+// they appear, for text no pattern can tell holds one, such as what the
+// operator typed.
+func (s Set) Redactor() *Redactor { return NewRedactor(s.PagerDutyKey, s.AtlassianToken, s.OrgAPIKey) }
+
 // IsZero reports whether the set holds no credential at all.
 func (s Set) IsZero() bool { return len(s.Missing()) == len(Kinds) }
 

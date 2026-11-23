@@ -23,7 +23,8 @@ type Step interface {
 	Name() string
 
 	// Read reads the step's part of one side into the snapshot; see
-	// discover.Reader.
+	// discover.Reader. A step that changes what it writes there implements
+	// discover.Versioned, so no read in the older format is reused.
 	Read(ctx context.Context, side review.Side, w *discover.Writer) error
 
 	// Plan turns both snapshots and the mappings of earlier runs into items.
@@ -39,7 +40,9 @@ type Step interface {
 	Apply(ctx context.Context, it review.Item, deps Results) (Outcome, error)
 
 	// Lookup says whether the call of an item whose outcome is unknown took
-	// effect. jsmAtPlan is the JSM snapshot the plan was built from: an
+	// effect, and what it made: a call JSM did not answer, or a create that
+	// answered without naming its object. jsmAtPlan is the JSM snapshot the
+	// plan was built from: an
 	// object that matches the item but is not in it was made by this run,
 	// which matters where JSM allows two objects with the same name.
 	Lookup(ctx context.Context, it review.Item, deps Results, jsmAtPlan *discover.Snapshot) (Lookup, error)
@@ -71,7 +74,10 @@ type Outcome struct {
 	// depends on gave. The zero Outcome is a call that was made.
 	Declined bool
 	// JSM is the object the call created or changed. It is saved in the
-	// mapping with the item's PagerDuty object.
+	// mapping with the item's PagerDuty object, so a create of an item with
+	// one must name it: without it, the next plan would create the object
+	// again, so the engine looks it up instead, and the item stays unknown
+	// until something names it.
 	JSM       *review.Ref
 	Status    int
 	RequestID string
@@ -100,7 +106,8 @@ const (
 	LookupUnknown LookupOutcome = iota
 	// LookupFound means the call took effect; Lookup.JSM is the object.
 	LookupFound
-	// LookupNotFound means the call did not take effect.
+	// LookupNotFound means the effect of the call was absent from the lookup.
+	// An absent object is insufficient evidence to resend a create.
 	LookupNotFound
 )
 
