@@ -364,7 +364,7 @@ func (x *executor) take(ctx, db context.Context, it review.Item, prev *journalRo
 			}
 		}
 	}
-	if callErr != nil && ctx.Err() != nil && !(it.Action == review.Create && row.createAcknowledged()) {
+	if callErr != nil && ctx.Err() != nil && (it.Action != review.Create || !row.createAcknowledged()) {
 		return Result{State: review.Unknown}, true, nil
 	}
 	acknowledged := false
@@ -560,7 +560,7 @@ func (x *executor) unnamed(ctx context.Context, step Step, it review.Item, deps 
 // positive lookup, even when it did not return a recordable object.
 func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps Results, callErr error, row *journalRow) bool {
 	class := messages.Classify(callErr, messages.Write)
-	if class != messages.ManualTask && !(it.Action == review.Create && row.createAcknowledged()) {
+	if class != messages.ManualTask && (it.Action != review.Create || !row.createAcknowledged()) {
 		row.state, row.jsm = review.Failed, nil
 		row.msgs = append(row.msgs, messages.Message{Class: class, Code: "call_failed",
 			Text: fmt.Sprintf("The %s call failed: %v", it.Action, callErr)})
