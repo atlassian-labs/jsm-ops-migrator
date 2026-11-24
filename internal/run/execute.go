@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/discover"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
@@ -19,8 +21,8 @@ import (
 // made and has no answer recorded yet.
 const sending review.EntryState = "sending"
 
-// resendAfter is how long after an update attempt resume first believes a
-// lookup that finds no change. A JSM write can take a moment to show, and the
+// resendAfter gives writes time to appear before an update is retried or
+// an operator can skip a create. A JSM write can take a moment to show, and the
 // call can still be in flight well after its row was written: one attempt
 // waits up to 30 seconds for its answer, and turning on Operations is polled
 // for 2 minutes. A lookup sooner than this can miss what the call made.
@@ -41,6 +43,38 @@ type journalRow struct {
 	requestID string
 	jsm       *review.Ref
 	msgs      []messages.Message
+}
+
+// createAcknowledged reports evidence already in the journal that a create
+// succeeded. The engine's receipt messages also cover steps without a status.
+func (row journalRow) createAcknowledged() bool {
+	return (row.status >= 200 && row.status < 300) || slices.ContainsFunc(row.msgs, func(m messages.Message) bool {
+		return m.Code == "object_unidentified" || m.Code == "object_unrecorded" || m.Code == "create_acknowledged"
+	})
+}
+
+// An older journal can have lost a receipt when a lookup replaced its
+// messages. Only an in-flight row or an explicit record of the missing
+// receipt can be used for an operator skip.
+func (row journalRow) canSkipCreate() bool {
+	return !row.createAcknowledged() && (row.state == sending || slices.ContainsFunc(row.msgs, func(m messages.Message) bool {
+		return m.Code == "create_without_receipt"
+	}))
+}
+
+// Preserve evidence about a create when validation or a lookup replaces its
+// messages. Earlier acknowledged outcomes take precedence over lookup misses.
+func (row *journalRow) preserveCreateEvidence(acknowledged, canSkip bool) {
+	if row.state != review.Unknown || row.createAcknowledged() {
+		return
+	}
+	if acknowledged {
+		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "create_acknowledged",
+			Text: "JSM previously acknowledged this create. Resume can finish the item once its object is identified."})
+	} else if canSkip && !row.canSkipCreate() {
+		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "create_without_receipt",
+			Text: "The journal has no successful response for this create attempt."})
+	}
 }
 
 // settled reports whether a row is the end of its item's turn: an item whose
@@ -90,6 +124,8 @@ type executor struct {
 	// latest is each item's latest row from before this command, for a run
 	// that is resumed.
 	latest map[string]journalRow
+	// skipCreate is an operator-confirmed omission for one journaled item.
+	skipCreate string
 	// taken and total count each step's items: taken those with a final
 	// state.
 	taken, total map[string]int
@@ -316,10 +352,22 @@ func (x *executor) take(ctx, db context.Context, it review.Item, prev *journalRo
 	if err := x.crashed(afterCall, it.Key); err != nil {
 		return Result{}, false, err
 	}
-	if callErr != nil && ctx.Err() != nil {
+	row.finished, row.status, row.requestID, row.msgs = x.e.now(), out.Status, out.RequestID, out.Messages
+	if it.Action == review.Create {
+		// A step can fail to decode the response with the 2xx receipt
+		// still available on the error, even when it returns no Outcome.
+		var response *httperr.Error
+		if errors.As(callErr, &response) && response.Status >= 200 && response.Status < 300 {
+			row.status = response.Status
+			if row.requestID == "" {
+				row.requestID = response.RequestID
+			}
+		}
+	}
+	if callErr != nil && ctx.Err() != nil && !(it.Action == review.Create && row.createAcknowledged()) {
 		return Result{State: review.Unknown}, true, nil
 	}
-	row.finished, row.status, row.requestID, row.msgs = x.e.now(), out.Status, out.RequestID, out.Messages
+	acknowledged := false
 	switch {
 	case callErr == nil && out.Declined:
 		row.state, row.jsm, row.attempt = review.Declined, nil, 0
@@ -328,6 +376,7 @@ func (x *executor) take(ctx, db context.Context, it review.Item, prev *journalRo
 				Text: "The step made no call, because of the result of an item it depends on."}}
 		}
 	case callErr == nil:
+		acknowledged = it.Action == review.Create
 		row.state = review.Done
 		switch {
 		case out.JSM != nil:
@@ -336,12 +385,13 @@ func (x *executor) take(ctx, db context.Context, it review.Item, prev *journalRo
 			x.unnamed(ctx, step, it, deps, &row)
 		}
 	default:
-		x.failed(ctx, step, it, deps, callErr, &row)
+		acknowledged = x.failed(ctx, step, it, deps, callErr, &row) && it.Action == review.Create
 	}
 	if prev != nil {
 		row.msgs = append([]messages.Message{sentAgain(it)}, row.msgs...)
 	}
 	x.checkAnswer(it, &row)
+	row.preserveCreateEvidence(acknowledged, it.Action == review.Create)
 	if err := x.finish(db, row, it, false, sending); err != nil {
 		return Result{}, false, err
 	}
@@ -400,8 +450,8 @@ func (x *executor) send(ctx context.Context, row journalRow, it review.Item, pre
 }
 
 // settle looks up a call whose result has not been settled. A create may
-// have succeeded even after repeated lookup misses, so it stays unresolved
-// until it can be mapped. Only updates are eligible for a resend.
+// have succeeded even after repeated lookup misses, so it requires a match
+// or an explicit operator skip. Only updates are eligible for a resend.
 //
 // The age is measured from the attempt's started_at, which is written before
 // the call and never changed, and the count is the journal's attempt number,
@@ -418,6 +468,10 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 	}
 	now := x.e.now()
 	notFound := err == nil && found.Outcome == LookupNotFound
+	foundObject := err == nil && found.Outcome == LookupFound
+	acknowledged := it.Action == review.Create && (foundObject || row.createAcknowledged())
+	canSkip := it.Action == review.Create && row.canSkipCreate()
+	skipRequested := it.Action == review.Create && x.skipCreate == it.Key
 	believed := row.started.Add(resendAfter)
 	if it.Action == review.Update && notFound && !now.Before(believed) && row.attempt < maxAttempts {
 		return x.take(ctx, db, it, &row)
@@ -426,14 +480,22 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 	row.finished = now
 	stop := false
 	switch {
-	case err == nil && found.Outcome == LookupFound && found.JSM != nil:
+	case foundObject && found.JSM != nil:
 		row.state, row.jsm = review.Done, found.JSM
 		row.msgs = []messages.Message{{Class: messages.Information, Code: "outcome_found",
 			Text: fmt.Sprintf("A lookup when the run was resumed identified the JSM object for the %s call.", it.Action)}}
+	case notFound && skipRequested:
+		row.state, row.jsm = review.Failed, nil
+		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "create_skipped",
+			Text: "The operator verified no object was made in JSM and skipped this create. A new plan can account for the skipped item."}}
 	case notFound && it.Action == review.Create:
 		row.state, row.jsm, stop = review.Unknown, nil, true
-		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "create_unresolved",
-			Text: "The lookup did not find the JSM object. The create may have succeeded, so resume will only look it up. Check JSM using the recorded request ID if available, then resume again."}}
+		text := "The lookup did not find the JSM object. The create may have succeeded, so resume will only look it up. Check JSM using the recorded request ID if available, then resume again."
+		if canSkip {
+			text += fmt.Sprintf(" If you verify that no object was made, pass item key %s to 'jsm-ops-migrator resume --skip-create' after %s.",
+				review.Quote(it.Key), messageTime(believed))
+		}
+		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "create_unresolved", Text: text}}
 	case notFound && now.Before(believed):
 		row.state, row.jsm, stop = review.Unknown, nil, true
 		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "lookup_too_soon",
@@ -453,9 +515,14 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 		if err != nil {
 			text += fmt.Sprintf(" The lookup failed: %v.", err)
 		}
+		if skipRequested {
+			stop = true
+			text += " Skipping requires a lookup that finds no matching object."
+		}
 		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "outcome_unknown", Text: text}}
 	}
 	x.checkAnswer(it, &row)
+	row.preserveCreateEvidence(acknowledged, canSkip)
 	if err := x.finish(db, row, it, false, before); err != nil {
 		return Result{}, false, err
 	}
@@ -469,21 +536,12 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 // messageTime is t as a message names it: in UTC, to the second.
 func messageTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
-// lookUp returns the object a step can identify as the result of the call.
-func (x *executor) lookUp(ctx context.Context, step Step, it review.Item, deps Results) (*review.Ref, error) {
-	found, err := step.Lookup(ctx, it, deps, x.jsm)
-	if err != nil || found.Outcome != LookupFound {
-		return nil, err
-	}
-	return found.JSM, nil
-}
-
 // unnamed reconciles a successful create whose response had no object ID.
 // Completing it without a mapping would let the next plan create it again.
 func (x *executor) unnamed(ctx context.Context, step Step, it review.Item, deps Results, row *journalRow) {
-	found, err := x.lookUp(ctx, step, it, deps)
-	if found != nil {
-		row.jsm = found
+	found, err := step.Lookup(ctx, it, deps, x.jsm)
+	if err == nil && found.Outcome == LookupFound && found.JSM != nil {
+		row.jsm = found.JSM
 		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "object_found",
 			Text: "The create call gave no JSM object, but a lookup found the one it made."})
 		return
@@ -498,21 +556,23 @@ func (x *executor) unnamed(ctx context.Context, step Step, it review.Item, deps 
 
 // failed records a call that returned an error. An unknown outcome gets one
 // immediate lookup, since a write can take time to show. If no object is
-// identified the item stays unknown for resume.
-func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps Results, callErr error, row *journalRow) {
+// identified the item stays unknown for resume. The return value reports a
+// positive lookup, even when it did not return a recordable object.
+func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps Results, callErr error, row *journalRow) bool {
 	class := messages.Classify(callErr, messages.Write)
-	if class != messages.ManualTask {
+	if class != messages.ManualTask && !(it.Action == review.Create && row.createAcknowledged()) {
 		row.state, row.jsm = review.Failed, nil
 		row.msgs = append(row.msgs, messages.Message{Class: class, Code: "call_failed",
 			Text: fmt.Sprintf("The %s call failed: %v", it.Action, callErr)})
-		return
+		return false
 	}
-	found, lookErr := x.lookUp(ctx, step, it, deps)
-	if found != nil {
-		row.state, row.jsm = review.Done, found
+	found, lookErr := step.Lookup(ctx, it, deps, x.jsm)
+	acknowledged := lookErr == nil && found.Outcome == LookupFound
+	if acknowledged && found.JSM != nil {
+		row.state, row.jsm = review.Done, found.JSM
 		row.msgs = append(row.msgs, messages.Message{Class: messages.Information, Code: "outcome_found",
 			Text: fmt.Sprintf("JSM did not answer the %s call (%v), but a lookup found that it took effect.", it.Action, callErr)})
-		return
+		return true
 	}
 	row.state, row.jsm = review.Unknown, nil
 	text := fmt.Sprintf("It is not known whether the %s call took effect: %v. Check it in JSM. Resume looks it up again.", it.Action, callErr)
@@ -524,6 +584,7 @@ func (x *executor) failed(ctx context.Context, step Step, it review.Item, deps R
 		text += fmt.Sprintf(" The lookup failed too: %v.", lookErr)
 	}
 	row.msgs = append(row.msgs, messages.Message{Class: messages.ManualTask, Code: "outcome_unknown", Text: text})
+	return acknowledged
 }
 
 // checkAnswer checks what the step answered as the run record will check

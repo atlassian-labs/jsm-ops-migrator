@@ -232,6 +232,22 @@ func TestApplyRefusesBeforeAskingForAConfirmation(t *testing.T) {
 	}
 }
 
+func TestApplyChecksTheSnapshotBeforeAskingForAConfirmation(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		t.Run(fmt.Sprintf("interactive=%t", interactive), func(t *testing.T) {
+			s, step := planned(t)
+			s.terminal = interactive
+			s.steps = append(s.steps, engine.Placeholders()...)
+			s.onChoose = func() { t.Error("asked to approve a plan with an incompatible snapshot") }
+			r := s.run("apply", "--jsm-plan", "premium")
+			if r.code != messages.ExitValidationFailed || !strings.Contains(r.stderr, "run plan again") ||
+				strings.Contains(r.stderr, "acceptance-template.yaml") || len(s.asked) != 0 || len(step.calls) != 0 {
+				t.Errorf("exit %d, stderr %q, prompts %v, writes %v", r.code, r.stderr, s.asked, step.calls)
+			}
+		})
+	}
+}
+
 func TestApplyRefusesAnAcceptanceFileThatDoesNotAcceptThePlan(t *testing.T) {
 	s, step := planned(t)
 	cases := map[string]struct {

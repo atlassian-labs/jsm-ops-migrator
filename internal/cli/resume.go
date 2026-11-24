@@ -26,7 +26,7 @@ import (
 // The run is announced to pause before anything else, so pause asked during
 // the checks is accepted and stops the run before its first item, whether
 // the run was paused or crashed.
-func runResume(ctx context.Context, env *Env, _ ResumeFlags) (err error) {
+func runResume(ctx context.Context, env *Env, f ResumeFlags) (err error) {
 	// The wrapper holds the workspace lock, so the status cannot change
 	// between this keyless check and opening the encrypted store.
 	status, err := engine.ReadStatus(ctx, env.Workspace)
@@ -34,6 +34,9 @@ func runResume(ctx context.Context, env *Env, _ ResumeFlags) (err error) {
 		return err
 	}
 	if status.Run == nil || status.Run.State == review.Completed {
+		if f.SkipCreate != "" {
+			return messages.ValidationFailed(engine.ErrNothingToResume)
+		}
 		env.summarize([]string{"Nothing to resume: no run is unfinished"})
 		if env.Output == OutputJSON {
 			return writeJSON(env.Stdout, struct {
@@ -113,7 +116,7 @@ func runResume(ctx context.Context, env *Env, _ ResumeFlags) (err error) {
 	}
 
 	view := startRunView(env, e)
-	res, err := e.Resume(ctx)
+	res, err := e.Resume(ctx, f.SkipCreate)
 	view.close()
 	return finishRun(env, "resume", out, res, err)
 }

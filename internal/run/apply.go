@@ -41,7 +41,7 @@ func (e *Engine) CheckApply(ctx context.Context, v *PlanVersion) error {
 	if err := e.CheckPlan(ctx, v); err != nil {
 		return err
 	}
-	return e.CheckPlanSteps(v)
+	return e.CheckPlanSteps(ctx, v)
 }
 
 // CheckPlan validates the workspace files and journal before prompting or building write clients.
@@ -94,12 +94,28 @@ func (e *Engine) checkPlanFile(v *PlanVersion, then string) error {
 	return nil
 }
 
-// CheckPlanSteps checks the build can execute every call in the plan.
-func (e *Engine) CheckPlanSteps(v *PlanVersion) error {
+// CheckPlanSteps checks the build can execute every call in the plan and
+// read the snapshot needed to reconcile its outcomes.
+func (e *Engine) CheckPlanSteps(ctx context.Context, v *PlanVersion) error {
+	_, err := e.checkedPlanRead(ctx, v)
+	return err
+}
+
+func (e *Engine) checkedPlanRead(ctx context.Context, v *PlanVersion) (*discover.Snapshot, error) {
 	if err := e.checkSteps(); err != nil {
-		return err
+		return nil, err
 	}
-	return e.checkKnownSteps(v, "run plan again")
+	if err := e.checkKnownSteps(v, "run plan again"); err != nil {
+		return nil, err
+	}
+	original, err := discover.Open(ctx, e.Store, v.JSMRead)
+	if err != nil || v.Calls == 0 {
+		return original, err
+	}
+	if !original.MatchesReaders(e.readers()) {
+		return nil, messages.ValidationFailed(fmt.Errorf("plan v%d uses a JSM snapshot from different steps or read formats; run plan again", v.Version))
+	}
+	return original, nil
 }
 
 func (e *Engine) checkKnownSteps(v *PlanVersion, then string) error {
@@ -152,7 +168,11 @@ type RunResult struct {
 // asks it to, and is marked paused. When ctx ends, it stops after the call
 // in flight and is marked interrupted.
 func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmation) (RunResult, error) {
-	if err := e.CheckApply(ctx, v); err != nil {
+	if err := e.CheckPlan(ctx, v); err != nil {
+		return RunResult{}, err
+	}
+	original, err := e.checkedPlanRead(ctx, v)
+	if err != nil {
 		return RunResult{}, err
 	}
 	if err := e.CheckAccounts(v); err != nil {
@@ -164,7 +184,7 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 	// What the operator typed is cleaned once, and the same confirmation is
 	// sealed and written, so neither keeps what the other leaves out.
 	c = e.cleaned(c)
-	jsm, err := e.lookupRead(ctx, v)
+	jsm, err := e.lookupRead(ctx, v, original)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -221,19 +241,13 @@ func (e *Engine) stoppedRun(ctx context.Context, info RunInfo, p review.Plan, ca
 	return RunResult{Info: info, Record: record}, cause
 }
 
-// lookupRead validates the plan's JSM read before using it or a newer complete
-// read of the same formats. A newer baseline avoids attributing objects created
-// between planning and applying to the run.
-func (e *Engine) lookupRead(ctx context.Context, v *PlanVersion) (*discover.Snapshot, error) {
-	original, err := discover.Open(ctx, e.Store, v.JSMRead)
-	if err != nil || v.Calls == 0 {
-		return original, err
+// lookupRead prefers a newer complete read of the same formats over the
+// checked plan read to avoid attributing intervening objects to the run.
+func (e *Engine) lookupRead(ctx context.Context, v *PlanVersion, original *discover.Snapshot) (*discover.Snapshot, error) {
+	if v.Calls == 0 {
+		return original, nil
 	}
-	readers := e.readers()
-	if !original.MatchesReaders(readers) {
-		return nil, messages.ValidationFailed(fmt.Errorf("plan v%d uses a JSM snapshot from different steps or read formats; run plan again", v.Version))
-	}
-	latest, err := discover.LatestComplete(ctx, e.Store, review.JSM, readers)
+	latest, err := discover.LatestComplete(ctx, e.Store, review.JSM, e.readers())
 	if err != nil {
 		return nil, err
 	}

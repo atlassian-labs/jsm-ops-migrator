@@ -34,7 +34,7 @@ func (w *workspace) activeRun() run.ActiveRun {
 
 func (w *workspace) resume(e *run.Engine) run.RunResult {
 	w.t.Helper()
-	res, err := e.Resume(context.Background())
+	res, err := e.Resume(context.Background(), "")
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestResumeLooksUpBeforeItSendsAgain(t *testing.T) {
 	if len(teams.applied) != 0 || !slices.Equal(teams.looked, []string{"teams/T3"}) {
 		t.Errorf("calls %v, lookups %v", teams.applied, teams.looked)
 	}
-	if _, err := e.Resume(context.Background()); !errors.Is(err, run.ErrNothingToResume) {
+	if _, err := e.Resume(context.Background(), ""); !errors.Is(err, run.ErrNothingToResume) {
 		t.Errorf("a resume after the run completed: %v", err)
 	}
 }
@@ -392,7 +392,7 @@ func TestResumeSendsACallAtMostMaxAttemptsTimes(t *testing.T) {
 		t.Errorf("T1's journal rows %v", states)
 	}
 	w.wait(10 * run.ResendAfter)
-	if _, err := e.Resume(context.Background()); !errors.Is(err, run.ErrNothingToResume) || r.objects["teams/T1"] != run.MaxAttempts {
+	if _, err := e.Resume(context.Background(), ""); !errors.Is(err, run.ErrNothingToResume) || r.objects["teams/T1"] != run.MaxAttempts {
 		t.Errorf("a resume after the run ended: %v, %d calls", err, r.objects["teams/T1"])
 	}
 }
@@ -566,7 +566,7 @@ func TestACrashWhileResumingMakesEachObjectOnce(t *testing.T) {
 						w.wait(run.ResendAfter)
 						e = w.engine(e.Steps...)
 						e.CrashAt(func(at run.CrashPoint, k string) bool { return at == q && k == second })
-						res, err := e.Resume(context.Background())
+						res, err := e.Resume(context.Background(), "")
 						if errors.Is(err, run.ErrCrashed) {
 							w.reopen()
 							w.wait(run.ResendAfter)
@@ -618,12 +618,20 @@ func teamUpdates(ids ...string) func(run.PlanInput) (run.Planned, error) {
 
 func TestResumeReconcilesASuccessfulCreateWithoutResending(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		ref   *review.Ref
-		crash bool
+		name        string
+		ref         *review.Ref
+		crash       bool
+		badMessage  bool
+		lookupFound bool
+		decodeError bool
+		canceled    bool
 	}{
 		{name: "missing ID"},
 		{name: "unrecordable ID", ref: pdRef("two words")},
+		{name: "missing ID with an invalid message", badMessage: true},
+		{name: "an immediate lookup found the object without its ID", lookupFound: true},
+		{name: "the decode error carries the successful status", decodeError: true},
+		{name: "the successful status arrived before cancellation", decodeError: true, canceled: true},
 		{name: "crash before recording the response", ref: pdRef("jsm-team"), crash: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -631,15 +639,33 @@ func TestResumeReconcilesASuccessfulCreateWithoutResending(t *testing.T) {
 			w := newWorkspace(t)
 			r := &remote{objects: map[string]int{}}
 			const key = "teams/T1"
-			teams := &answerStep{fakeStep: newStep("teams", r), objects: map[string]*review.Ref{key: tc.ref}}
+			teams := &answerStep{fakeStep: newStep("teams", r), objects: map[string]*review.Ref{key: tc.ref}, omitStatus: true}
 			teams.plan = teamsPlan("T1")
 			teams.found[key] = run.Lookup{Outcome: run.LookupNotFound}
+			if tc.badMessage {
+				teams.responseMessages = []messages.Message{{Class: messages.Information, Code: "bad code", Text: "Invalid message from step."}}
+			}
+			if tc.lookupFound {
+				teams.errs[key] = httperr.ErrUnknownOutcome
+				teams.found[key] = run.Lookup{Outcome: run.LookupFound}
+			}
+			if tc.decodeError {
+				teams.errs[key] = fmt.Errorf("team response: %w", &httperr.Error{
+					Method: "POST", Family: "jsm-ops", Path: "/v1/teams", Status: 201,
+					Kind: httperr.ErrUnknownOutcome, Cause: errors.New("could not decode the response"),
+				})
+			}
 			e := w.engine(teams)
 			v := w.plan(e).Version
 			if tc.crash {
 				e.CrashAt(func(at run.CrashPoint, k string) bool { return at == run.CrashPoints[2] && k == key })
 			}
-			res, err := e.Apply(ctx, v, confirmation(v))
+			applyCtx, cancel := context.WithCancel(ctx)
+			if tc.canceled {
+				teams.during = func(review.Item) { cancel() }
+			}
+			res, err := e.Apply(applyCtx, v, confirmation(v))
+			cancel()
 			if tc.crash {
 				if !errors.Is(err, run.ErrCrashed) {
 					t.Fatalf("apply after crash: %v", err)
@@ -648,6 +674,7 @@ func TestResumeReconcilesASuccessfulCreateWithoutResending(t *testing.T) {
 				t.Fatalf("apply: run %s, error %v", res.Info.State, err)
 			}
 			once(t, r, key)
+			teams.found[key] = run.Lookup{Outcome: run.LookupNotFound}
 			for range run.MaxAttempts + 1 {
 				w.reopen()
 				w.wait(run.ResendAfter)
@@ -659,8 +686,24 @@ func TestResumeReconcilesASuccessfulCreateWithoutResending(t *testing.T) {
 				}
 				once(t, r, key)
 			}
+			if !tc.crash {
+				if _, err := e.Resume(ctx, key); messagesExit(err) != messages.ExitValidationFailed ||
+					!strings.Contains(err.Error(), "JSM acknowledged create") {
+					t.Fatalf("skipping a known successful create: %v", err)
+				}
+				once(t, r, key)
+			}
 			teams.found[key] = run.Lookup{Outcome: run.LookupFound, JSM: pdRef("jsm-team")}
-			allDone(t, w.resume(e))
+			skip := ""
+			if tc.crash {
+				// A matching object wins even if the operator requested a skip.
+				skip = key
+			}
+			res, err = e.Resume(ctx, skip)
+			if err != nil {
+				t.Fatal(err)
+			}
+			allDone(t, res)
 			once(t, r, key)
 			var id string
 			if err := w.st.DB().QueryRow(`SELECT jsm_id FROM mappings WHERE pagerduty_id = 'T1'`).Scan(&id); err != nil || id != "jsm-team" {
@@ -668,6 +711,82 @@ func TestResumeReconcilesASuccessfulCreateWithoutResending(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResumeCanSkipAConfirmedAbsentCreateAfterCrashingBeforeSend(t *testing.T) {
+	ctx := context.Background()
+	w := newWorkspace(t)
+	r := &remote{objects: map[string]int{}}
+	teams := newStep("teams", r)
+	teams.plan = teamsPlan("T1", "T2")
+	const first, second = "teams/T1", "teams/T2"
+	e := w.engine(teams)
+	v := w.plan(e).Version
+	e.CrashAt(func(at run.CrashPoint, key string) bool { return at == run.CrashPoints[1] && key == first })
+	if _, err := e.Apply(ctx, v, confirmation(v)); !errors.Is(err, run.ErrCrashed) || len(r.objects) != 0 {
+		t.Fatalf("apply: %v, writes %v", err, r.objects)
+	}
+	w.reopen()
+	e = w.engine(teams)
+	if _, err := e.Resume(ctx, first); messagesExit(err) != messages.ExitValidationFailed {
+		t.Fatalf("skipping before the create had time to appear: %v", err)
+	}
+	w.wait(run.ResendAfter)
+	if _, err := e.Resume(ctx, second); messagesExit(err) != messages.ExitValidationFailed {
+		t.Fatalf("skipping a later item: %v", err)
+	}
+	if res, err := e.Resume(ctx, first); err != nil || res.Info.State != review.Interrupted || len(r.objects) != 0 {
+		t.Fatalf("skipping without a lookup miss: run %s, writes %v, err %v", res.Info.State, r.objects, err)
+	}
+	teams.found[first] = run.Lookup{Outcome: run.LookupNotFound}
+	if res := w.resume(e); res.Info.State != review.Interrupted || len(r.objects) != 0 {
+		t.Fatalf("resume without operator skip: run %s, writes %v", res.Info.State, r.objects)
+	}
+	res, err := e.Resume(ctx, first)
+	if err != nil || res.Info.State != review.Completed || r.objects[first] != 0 || r.objects[second] != 1 {
+		t.Fatalf("resume with skip: run %s, writes %v, err %v", res.Info.State, r.objects, err)
+	}
+	entry := res.Record.Entries[0]
+	if entry.Key != first || entry.State != review.Failed || entry.Attempts != 1 || len(entry.Messages) != 1 || entry.Messages[0].Code != "create_skipped" {
+		t.Fatalf("skipped entry: %+v", entry)
+	}
+	w.reopen()
+	e = w.engine(teams)
+	if next := w.plan(e).Version; next.Calls != 1 || next.Plan.Items[0].Key != first || next.Plan.Items[0].Action != review.Create {
+		t.Fatalf("next plan should offer only the skipped create: %+v", next.Plan.Items)
+	}
+}
+
+func TestResumeWillNotSkipAnOlderCreateWithMissingReceiptHistory(t *testing.T) {
+	ctx := context.Background()
+	w := newWorkspace(t)
+	r := &remote{objects: map[string]int{}}
+	const key = "teams/T1"
+	teams := &answerStep{fakeStep: newStep("teams", r), objects: map[string]*review.Ref{key: nil}, omitStatus: true}
+	teams.plan = teamsPlan("T1")
+	e := w.engine(teams)
+	res := w.apply(e, w.plan(e).Version)
+	if res.Info.State != review.Interrupted {
+		t.Fatalf("apply: %s", res.Info.State)
+	}
+	// The earlier build replaced the acknowledgement on a lookup miss.
+	if _, err := w.st.DB().ExecContext(ctx, `UPDATE journal SET messages = NULL WHERE run_id = ?`, res.Info.ID); err != nil {
+		t.Fatal(err)
+	}
+	w.reopen()
+	w.wait(run.ResendAfter)
+	e = w.engine(teams)
+	teams.found[key] = run.Lookup{Outcome: run.LookupNotFound}
+	if res := w.resume(e); res.Info.State != review.Interrupted {
+		t.Fatalf("resume after a lookup miss: %s", res.Info.State)
+	}
+	if _, err := e.Resume(ctx, key); messagesExit(err) != messages.ExitValidationFailed ||
+		!strings.Contains(err.Error(), "lacks the receipt history") {
+		t.Fatalf("skipping without receipt history: %v", err)
+	}
+	teams.found[key] = run.Lookup{Outcome: run.LookupFound, JSM: pdRef("jsm-recovered")}
+	allDone(t, w.resume(e))
+	once(t, r, key)
 }
 
 func TestResumeUsesTheRunsSnapshotFormat(t *testing.T) {
@@ -688,7 +807,7 @@ func TestResumeUsesTheRunsSnapshotFormat(t *testing.T) {
 	if _, err := other.Read(ctx, review.JSM); err != nil {
 		t.Fatal(err)
 	}
-	if res, err := other.Resume(ctx); messagesExit(err) != messages.ExitValidationFailed || res.Info.State != review.Paused {
+	if res, err := other.Resume(ctx, ""); messagesExit(err) != messages.ExitValidationFailed || res.Info.State != review.Paused {
 		t.Errorf("resume with newer format: run %s, error %v", res.Info.State, err)
 	}
 	if len(r.objects) != 0 || len(teams.looked) != 0 {
@@ -759,14 +878,14 @@ func TestResumeRefusesWhatItCannotRun(t *testing.T) {
 	if err := os.WriteFile(path, append(data, ' '), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Resume(ctx); messagesExit(err) != messages.ExitValidationFailed {
+	if _, err := e.Resume(ctx, ""); messagesExit(err) != messages.ExitValidationFailed {
 		t.Errorf("an edited plan.json: %v", err)
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	other := w.engine(newStep("users", &remote{objects: map[string]int{}}))
-	if _, err := other.Resume(ctx); !errors.Is(err, run.ErrUnknownStep) {
+	if _, err := other.Resume(ctx, ""); !errors.Is(err, run.ErrUnknownStep) {
 		t.Errorf("a plan whose step this build lacks: %v", err)
 	}
 	accounts := e.Accounts
@@ -774,7 +893,7 @@ func TestResumeRefusesWhatItCannotRun(t *testing.T) {
 		review.PagerDuty: accounts[review.PagerDuty],
 		review.JSM:       {ID: "cloud-2", OrgID: accounts[review.JSM].OrgID},
 	}
-	if _, err := e.Resume(ctx); messagesExit(err) != messages.ExitValidationFailed {
+	if _, err := e.Resume(ctx, ""); messagesExit(err) != messages.ExitValidationFailed {
 		t.Errorf("another JSM site: %v", err)
 	}
 	e.Accounts = accounts

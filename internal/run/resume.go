@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/discover"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
@@ -63,8 +64,10 @@ func (e *Engine) CheckResumeSteps(r *Resumable) error {
 // Resume continues the unfinished run on its own plan version, from the
 // first item that has no final state. Before an item whose call is sending
 // or unknown is taken further, its step looks it up. A create needs a
-// recordable match to complete. An update can also be sent again after a
-// lookup miss once the attempt is old enough, up to maxAttempts in all.
+// recordable match to complete. An operator who confirmed the absence of a
+// create can supply its key in skipCreate to leave it for a new plan after
+// another lookup miss. An update can be sent again after a lookup miss once
+// the attempt is old enough, up to maxAttempts in all.
 //
 // A run marked running is one whose command ended without marking it, such
 // as in a crash: the caller holds the workspace lock, so no other command is
@@ -75,7 +78,7 @@ func (e *Engine) CheckResumeSteps(r *Resumable) error {
 // final state. The caller announces the run with Announce before its own
 // checks, which removes a request left from before, so the one Resume finds
 // was asked during them, after a clean pause and after a crash alike.
-func (e *Engine) Resume(ctx context.Context) (RunResult, error) {
+func (e *Engine) Resume(ctx context.Context, skipCreate string) (RunResult, error) {
 	r, err := e.CheckResume(ctx)
 	if err != nil {
 		return RunResult{}, err
@@ -96,12 +99,17 @@ func (e *Engine) Resume(ctx context.Context) (RunResult, error) {
 		err := messages.ValidationFailed(fmt.Errorf("run %s uses a JSM snapshot from different steps or read formats; resume with the build that started it", info.ID))
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
-	if err := review.WriteConfirmation(e.Workspace, r.Confirmation, r.Version.Plan); err != nil &&
-		!errors.Is(err, review.ErrAlreadyConfirmed) {
-		return e.stoppedRun(ctx, info, r.Version.Plan, err)
-	}
 	j, err := e.readJournal(ctx, info.ID)
 	if err != nil {
+		return e.stoppedRun(ctx, info, r.Version.Plan, err)
+	}
+	if skipCreate != "" {
+		if err := checkSkipCreate(r.Version.Plan, j, skipCreate, e.now()); err != nil {
+			return RunResult{}, err
+		}
+	}
+	if err := review.WriteConfirmation(e.Workspace, r.Confirmation, r.Version.Plan); err != nil &&
+		!errors.Is(err, review.ErrAlreadyConfirmed) {
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
 	if _, err := e.Store.DB().ExecContext(ctx, `UPDATE runs SET state = ? WHERE id = ?`, string(review.Running), info.ID); err != nil {
@@ -109,8 +117,34 @@ func (e *Engine) Resume(ctx context.Context) (RunResult, error) {
 	}
 	info.State = review.Running
 	x := newExecutor(e, &info, r.Version.Plan, jsm, j)
+	x.skipCreate = skipCreate
 	if _, err := x.writeRecord(ctx, info); err != nil {
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
 	return e.execute(ctx, x)
+}
+
+// checkSkipCreate restricts the flag to the first outstanding item so a
+// mistaken key fails before resume can make any other write.
+func checkSkipCreate(p review.Plan, j journal, key string, now time.Time) error {
+	for _, it := range p.Items {
+		row, seen := j.latest[it.Key]
+		if seen && settled(row.state) {
+			continue
+		}
+		if it.Key != key || it.Action != review.Create || !seen {
+			break
+		}
+		if row.createAcknowledged() {
+			return messages.ValidationFailed(fmt.Errorf("JSM acknowledged create %s. Resume without --skip-create to look up its object", review.Quote(it.Key)))
+		}
+		if !row.canSkipCreate() {
+			return messages.ValidationFailed(fmt.Errorf("the journal lacks the receipt history needed to skip create %s. Resume without --skip-create to look up its object", review.Quote(it.Key)))
+		}
+		if after := row.started.Add(resendAfter); now.Before(after) {
+			return messages.ValidationFailed(fmt.Errorf("wait until %s before skipping create %s, so an in-flight create has time to appear", messageTime(after), review.Quote(it.Key)))
+		}
+		return nil
+	}
+	return messages.ValidationFailed(errors.New("--skip-create must name the first unfinished item, which must be a journaled create"))
 }

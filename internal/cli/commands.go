@@ -41,7 +41,7 @@ type ApplyFlags struct {
 type PauseFlags struct{}
 
 // ResumeFlags are the resume command's own flags.
-type ResumeFlags struct{}
+type ResumeFlags struct{ SkipCreate string }
 
 // bodies are the command implementations. Login and pre-flight replaces login,
 // and the Run engine replaces the others; tests substitute their own.
@@ -168,10 +168,18 @@ func (r *runner) newRootCommand() *cobra.Command {
 		Use:   "resume",
 		Short: "Continue a paused or interrupted apply",
 		Args:  cobra.NoArgs,
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("skip-create") && r.resume.SkipCreate == "" {
+				return errors.New("--skip-create requires the item key")
+			}
+			return nil
+		},
 		RunE: r.wrap(specResume, func(ctx context.Context, env *Env) error {
 			return r.bodies.resume(ctx, env, r.resume)
 		}),
 	}
+	resume.Flags().StringVar(&r.resume.SkipCreate, "skip-create", "",
+		"leave the first unresolved create for a new plan after verifying no object was made in JSM (item key)")
 	root.AddCommand(login, plan, apply, pause, resume)
 
 	return root

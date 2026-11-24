@@ -75,7 +75,7 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 		if e.Steps, err = env.Steps(creds.set); err != nil {
 			return err
 		}
-		if err := e.CheckPlanSteps(v); err != nil {
+		if err := e.CheckPlanSteps(ctx, v); err != nil {
 			return err
 		}
 		template := filepath.Join(env.Workspace.ArtifactsDir(), v.Dir, review.AcceptanceTemplateFile)
@@ -116,7 +116,7 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 	if e.Steps, err = env.Steps(creds.set); err != nil {
 		return out.emit(env, err)
 	}
-	if err := e.CheckPlanSteps(v); err != nil {
+	if err := e.CheckPlanSteps(ctx, v); err != nil {
 		return out.emit(env, err)
 	}
 	pv := planResult(env.Workspace, engine.PlanResult{Version: v})

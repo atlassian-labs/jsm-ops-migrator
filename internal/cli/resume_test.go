@@ -212,6 +212,31 @@ func TestResumeWaitsForRequiredPreflight(t *testing.T) {
 	}
 }
 
+func TestResumeSkipCreateFlagLeavesTheWriteForANewPlan(t *testing.T) {
+	s, step := planned(t)
+	step.during = func(ctx context.Context, key string) error {
+		if key == "teams/PT1" {
+			s.env.RequestInterrupt()
+			s.env.RequestInterrupt()
+			return ctx.Err()
+		}
+		return nil
+	}
+	if r := s.run("apply", "--jsm-plan", "premium", "--accept-file", s.acceptanceFile("known")); r.code != messages.ExitPartial {
+		t.Fatalf("apply: exit %d, stderr %s", r.code, r.stderr)
+	}
+	step.during = nil
+	step.found["teams/PT1"] = engine.Lookup{Outcome: engine.LookupNotFound}
+	s.wait(time.Hour)
+	r := s.run("resume", "--jsm-plan", "premium", "--skip-create", "teams/PT1")
+	if r.code != messages.ExitPartial || !strings.Contains(r.stdout, "create_skipped") || strings.Join(step.calls, " ") != "teams/PT1 teams/PT2" {
+		t.Errorf("resume: exit %d, calls %v, stderr %s\n%s", r.code, step.calls, r.stderr, r.stdout)
+	}
+	if r := s.run("plan", "--jsm-plan", "premium"); r.code != ExitOK || !strings.Contains(r.stdout, "Plan v2: 1 call") {
+		t.Errorf("replan: exit %d, stderr %s\n%s", r.code, r.stderr, r.stdout)
+	}
+}
+
 // The confirmation names the account whose API token makes the run's calls,
 // so resume needs that account's token.
 func TestResumeNeedsTheAccountThatConfirmed(t *testing.T) {

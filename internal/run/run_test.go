@@ -434,7 +434,8 @@ func TestAnUnknownOutcomeIsLookedUpOnce(t *testing.T) {
 		if e.Key == "teams/T1" && (e.JSM == nil || e.JSM.ID != "jsm-found") {
 			t.Errorf("T1's JSM object %+v", e.JSM)
 		}
-		if e.Key == "teams/T2" && (len(e.Messages) != 1 || e.Messages[0].Class != messages.ManualTask) {
+		if e.Key == "teams/T2" && (len(e.Messages) != 2 || e.Messages[0].Class != messages.ManualTask ||
+			e.Messages[1].Code != "create_without_receipt") {
 			t.Errorf("T2's messages %+v", e.Messages)
 		}
 	}
@@ -838,7 +839,9 @@ func TestUnboundReadsAndMappingsFromOlderWorkspaces(t *testing.T) {
 // there instead: nil for none.
 type answerStep struct {
 	*fakeStep
-	objects map[string]*review.Ref
+	objects          map[string]*review.Ref
+	omitStatus       bool
+	responseMessages []messages.Message
 }
 
 func (s *answerStep) Apply(ctx context.Context, it review.Item, deps run.Results) (run.Outcome, error) {
@@ -846,6 +849,10 @@ func (s *answerStep) Apply(ctx context.Context, it review.Item, deps run.Results
 	if ref, ok := s.objects[it.Key]; ok {
 		out.JSM = ref
 	}
+	if s.omitStatus {
+		out.Status = 0
+	}
+	out.Messages = append(out.Messages, s.responseMessages...)
 	return out, err
 }
 

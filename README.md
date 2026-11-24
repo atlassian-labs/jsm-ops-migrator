@@ -36,6 +36,10 @@ The CLI will work in three steps:
 
 Use a separate `--workspace` for each migration. The first read of each side binds the workspace to its PagerDuty account host or its JSM cloud ID and organization ID. You can rotate credentials for those accounts. Each plan version writes its own `acceptance-template.yaml`.
 
+Use `resume` to reconcile an interrupted create by looking up its JSM object. If you verify in JSM that no object was made, wait ten minutes from the recorded attempt and run `resume --skip-create <item-key>` for the first unfinished item. A fresh lookup must also find no match. The run records the skipped create for a new plan. When JSM has acknowledged the create, resume needs to identify its object.
+
+Reconcile any unfinished write run from a build that predates snapshot coverage before upgrading its workspace. The workspace keeps its original schema until that run is finished.
+
 ## Installation
 
 Installation instructions will be added with the first release.
