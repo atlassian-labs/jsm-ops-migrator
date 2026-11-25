@@ -195,14 +195,12 @@ func TestAPauseRequestForAnotherRunIsIgnored(t *testing.T) {
 	}
 }
 
-// After a pause, resume takes only what is left. An item whose call is
-// unknown is looked up first: found is done, not found once the call is old
-// enough is sent again, and anything else stays unknown and is never sent.
+// Resume looks up uncertain updates before it decides whether to send them.
 func TestResumeLooksUpBeforeItSendsAgain(t *testing.T) {
 	w := newWorkspace(t)
 	r := &remote{objects: map[string]int{}}
 	teams := newStep("teams", r)
-	teams.plan = teamsPlan("T1", "T2", "T3", "T4")
+	teams.plan = teamUpdates("T1", "T2", "T3", "T4")
 	unknown := fmt.Errorf("POST /v1/teams: %w: %w", httperr.ErrUnknownOutcome, httperr.ErrUnavailable)
 	for _, k := range []string{"teams/T1", "teams/T2", "teams/T3"} {
 		teams.errs[k] = unknown
@@ -341,7 +339,7 @@ func TestResumeSendsACallAtMostMaxAttemptsTimes(t *testing.T) {
 	w := newWorkspace(t)
 	r := &remote{objects: map[string]int{}}
 	teams := newStep("teams", r)
-	teams.plan = teamsPlan("T1")
+	teams.plan = teamUpdates("T1")
 	teams.errs["teams/T1"] = fmt.Errorf("POST /v1/teams: %w: %w", httperr.ErrUnknownOutcome, httperr.ErrUnavailable)
 	teams.found["teams/T1"] = run.Lookup{Outcome: run.LookupNotFound}
 	e := w.engine(teams)
@@ -515,7 +513,7 @@ func TestWithdrawRemovesTheAnnouncement(t *testing.T) {
 	}
 }
 
-// A crash at any point of any call, then resume, makes every object once:
+// A crash at any point of an update, then resume, applies every change once:
 // the row is committed as sending before the call, and resume looks a
 // sending row up before it sends anything. The resume comes once a lookup
 // that finds nothing is believed; one sooner sends nothing (see
@@ -586,8 +584,8 @@ func TestACrashWhileResumingMakesEachObjectOnce(t *testing.T) {
 	}
 }
 
-// crashSetup plans two teams, one with a dependent call, and a map between
-// them that makes no call, with a step whose lookups answer as JSM would.
+// crashSetup plans updates, one with a dependent call, and a map that
+// makes no call, with a step whose lookups answer as JSM would.
 func crashSetup(t *testing.T) (*workspace, *run.Engine, *remote) {
 	t.Helper()
 	w := newWorkspace(t)
@@ -596,15 +594,294 @@ func crashSetup(t *testing.T) (*workspace, *run.Engine, *remote) {
 	teams.honest = true
 	teams.plan = func(run.PlanInput) (run.Planned, error) {
 		return run.Planned{Items: []review.Item{
-			{Key: "teams/T1", Action: review.Create, Summary: "Create Platform", PagerDuty: pdRef("T1")},
-			{Key: "teams/T1-ops", Action: review.Create, Summary: "Turn on Operations", DependsOn: []string{"teams/T1"}},
+			{Key: "teams/T1", Action: review.Update, Summary: "Update Platform", PagerDuty: pdRef("T1"), JSM: pdRef("jsm-platform")},
+			{Key: "teams/T1-ops", Action: review.Update, Summary: "Turn on Operations", JSM: pdRef("jsm-platform"), DependsOn: []string{"teams/T1"}},
 			{Key: "teams/T2", Action: review.Map, Summary: "Map Payments", PagerDuty: pdRef("T2"), JSM: &review.Ref{Type: "team", ID: "jsm-existing"}},
-			{Key: "teams/T3", Action: review.Create, Summary: "Create Search", PagerDuty: pdRef("T3")},
+			{Key: "teams/T3", Action: review.Update, Summary: "Update Search", PagerDuty: pdRef("T3"), JSM: pdRef("jsm-search")},
 		}}, nil
 	}
 	e := w.engine(teams)
 	w.plan(e)
 	return w, e, r
+}
+
+func teamUpdates(ids ...string) func(run.PlanInput) (run.Planned, error) {
+	return func(run.PlanInput) (run.Planned, error) {
+		var p run.Planned
+		for _, id := range ids {
+			p.Items = append(p.Items, review.Item{Key: "teams/" + id, Action: review.Update, Summary: "Update team " + id,
+				PagerDuty: pdRef(id), JSM: pdRef("jsm-" + id)})
+		}
+		return p, nil
+	}
+}
+
+func TestResumeReconcilesASuccessfulCreateWithoutResending(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		ref         *review.Ref
+		crash       bool
+		badMessage  bool
+		lookupFound bool
+		decodeError bool
+		canceled    bool
+	}{
+		{name: "missing ID"},
+		{name: "unrecordable ID", ref: pdRef("two words")},
+		{name: "missing ID with an invalid message", badMessage: true},
+		{name: "an immediate lookup found the object without its ID", lookupFound: true},
+		{name: "the decode error carries the successful status", decodeError: true},
+		{name: "the successful status arrived before cancellation", decodeError: true, canceled: true},
+		{name: "crash before recording the response", ref: pdRef("jsm-team"), crash: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			w := newWorkspace(t)
+			r := &remote{objects: map[string]int{}}
+			const key = "teams/T1"
+			teams := &answerStep{fakeStep: newStep("teams", r), objects: map[string]*review.Ref{key: tc.ref}, omitStatus: true}
+			teams.plan = teamsPlan("T1")
+			teams.found[key] = run.Lookup{Outcome: run.LookupNotFound}
+			if tc.badMessage {
+				teams.responseMessages = []messages.Message{{Class: messages.Information, Code: "bad code", Text: "Invalid message from step."}}
+			}
+			if tc.lookupFound {
+				teams.errs[key] = httperr.ErrUnknownOutcome
+				teams.found[key] = run.Lookup{Outcome: run.LookupFound}
+			}
+			if tc.decodeError {
+				teams.errs[key] = fmt.Errorf("team response: %w", &httperr.Error{
+					Method: "POST", Family: "jsm-ops", Path: "/v1/teams", Status: 201,
+					Kind: httperr.ErrUnknownOutcome, Cause: errors.New("could not decode the response"),
+				})
+			}
+			e := w.engine(teams)
+			v := w.plan(e).Version
+			if tc.crash {
+				e.CrashAt(func(at run.CrashPoint, k string) bool { return at == run.CrashPoints[2] && k == key })
+			}
+			applyCtx, cancel := context.WithCancel(ctx)
+			if tc.canceled {
+				teams.during = func(review.Item) { cancel() }
+			}
+			res, err := e.Apply(applyCtx, v, confirmation(v))
+			cancel()
+			if tc.crash {
+				if !errors.Is(err, run.ErrCrashed) {
+					t.Fatalf("apply after crash: %v", err)
+				}
+			} else if err != nil || res.Info.State != review.Interrupted {
+				t.Fatalf("apply: run %s, error %v", res.Info.State, err)
+			}
+			once(t, r, key)
+			teams.found[key] = run.Lookup{Outcome: run.LookupNotFound}
+			for range run.MaxAttempts + 1 {
+				w.reopen()
+				w.wait(run.ResendAfter)
+				e = w.engine(teams)
+				res = w.resume(e)
+				en := res.Record.Entries[0]
+				if res.Info.State != review.Interrupted || en.State != review.Unknown || en.Attempts != 1 {
+					t.Fatalf("lookup miss: run %s, entry %+v", res.Info.State, en)
+				}
+				once(t, r, key)
+			}
+			if !tc.crash {
+				if _, err := e.Resume(ctx, key); messagesExit(err) != messages.ExitValidationFailed ||
+					!strings.Contains(err.Error(), "JSM acknowledged create") {
+					t.Fatalf("skipping a known successful create: %v", err)
+				}
+				once(t, r, key)
+			}
+			teams.found[key] = run.Lookup{Outcome: run.LookupFound, JSM: pdRef("jsm-team")}
+			var skip []string
+			if tc.crash {
+				// A matching object wins even if the operator requested a skip.
+				skip = []string{key}
+			}
+			res, err = e.Resume(ctx, skip...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			allDone(t, res)
+			once(t, r, key)
+			var id string
+			if err := w.st.DB().QueryRow(`SELECT jsm_id FROM mappings WHERE pagerduty_id = 'T1'`).Scan(&id); err != nil || id != "jsm-team" {
+				t.Errorf("mapping after resume: %q, %v", id, err)
+			}
+		})
+	}
+}
+
+func TestResumeCanSkipAConfirmedAbsentCreateAfterCrashingBeforeSend(t *testing.T) {
+	ctx := context.Background()
+	w := newWorkspace(t)
+	r := &remote{objects: map[string]int{}}
+	teams := newStep("teams", r)
+	teams.plan = teamsPlan("T1", "T2")
+	const first, second = "teams/T1", "teams/T2"
+	e := w.engine(teams)
+	v := w.plan(e).Version
+	e.CrashAt(func(at run.CrashPoint, key string) bool { return at == run.CrashPoints[1] && key == first })
+	if _, err := e.Apply(ctx, v, confirmation(v)); !errors.Is(err, run.ErrCrashed) || len(r.objects) != 0 {
+		t.Fatalf("apply: %v, writes %v", err, r.objects)
+	}
+	w.reopen()
+	e = w.engine(teams)
+	if _, err := e.Resume(ctx, first); messagesExit(err) != messages.ExitValidationFailed {
+		t.Fatalf("skipping before the create had time to appear: %v", err)
+	}
+	w.wait(run.ResendAfter)
+	if _, err := e.Resume(ctx, first, second); messagesExit(err) != messages.ExitValidationFailed || len(r.objects) != 0 {
+		t.Fatalf("batch with an unjournaled item: writes %v, err %v", r.objects, err)
+	}
+	if res, err := e.Resume(ctx, first); err != nil || res.Info.State != review.Interrupted || r.objects[first] != 0 || r.objects[second] != 1 {
+		t.Fatalf("skipping without a lookup miss: run %s, writes %v, err %v", res.Info.State, r.objects, err)
+	}
+	teams.found[first] = run.Lookup{Outcome: run.LookupNotFound}
+	if res := w.resume(e); res.Info.State != review.Interrupted || r.objects[first] != 0 || r.objects[second] != 1 {
+		t.Fatalf("resume without operator skip: run %s, writes %v", res.Info.State, r.objects)
+	}
+	res, err := e.Resume(ctx, first)
+	if err != nil || res.Info.State != review.Completed || r.objects[first] != 0 || r.objects[second] != 1 {
+		t.Fatalf("resume with skip: run %s, writes %v, err %v", res.Info.State, r.objects, err)
+	}
+	entry := res.Record.Entries[0]
+	if entry.Key != first || entry.State != review.Failed || entry.Attempts != 1 || len(entry.Messages) != 1 || entry.Messages[0].Code != "create_skipped" {
+		t.Fatalf("skipped entry: %+v", entry)
+	}
+	w.reopen()
+	e = w.engine(teams)
+	if next := w.plan(e).Version; next.Calls != 1 || next.Plan.Items[0].Key != first || next.Plan.Items[0].Action != review.Create {
+		t.Fatalf("next plan should offer only the skipped create: %+v", next.Plan.Items)
+	}
+}
+
+func TestUnresolvedCreateDefersOnlyItsDependents(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("settled intermediate=%t", legacy), func(t *testing.T) {
+			ctx := context.Background()
+			w := newWorkspace(t)
+			r := &remote{objects: map[string]int{}}
+			teams := newStep("teams", r)
+			const parent, child, grandchild, independent = "teams/T1", "teams/T2", "teams/T3", "teams/T4"
+			basePlan := teamsPlan("T1", "T2", "T3", "T4")
+			teams.plan = func(in run.PlanInput) (run.Planned, error) {
+				p, err := basePlan(in)
+				p.Items[1].DependsOn = []string{parent}
+				p.Items[2].DependsOn = []string{child}
+				if legacy {
+					p.Items[1].Action = review.Map
+					p.Items[1].JSM = pdRef("jsm-existing")
+				}
+				return p, err
+			}
+			e := w.engine(teams)
+			v := w.plan(e).Version
+			// The create reached JSM, but the process died before recording its response.
+			e.CrashAt(func(at run.CrashPoint, key string) bool { return at == run.CrashPoints[2] && key == parent })
+			started, err := e.Apply(ctx, v, confirmation(v))
+			if !errors.Is(err, run.ErrCrashed) {
+				t.Fatalf("apply: %v", err)
+			}
+			once(t, r, parent)
+			wantChild := review.Pending
+			wantCalls := []string{parent, independent, child, grandchild}
+			if legacy {
+				// The previous executor could finish a map while its dependency
+				// was unresolved, then pause before the next call.
+				ts := now.Format(time.RFC3339Nano)
+				if _, err := w.st.DB().ExecContext(ctx, `INSERT INTO journal
+					(run_id, seq, item_key, attempt, state, started_at, finished_at, jsm_type, jsm_id)
+					VALUES (?, 2, ?, 0, 'done', ?, ?, 'team', 'jsm-existing')`,
+					started.Info.ID, child, ts, ts); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := w.st.DB().ExecContext(ctx, `UPDATE runs SET written = 1 WHERE id = ?`, started.Info.ID); err != nil {
+					t.Fatal(err)
+				}
+				wantChild = review.Done
+				wantCalls = []string{parent, independent, grandchild}
+			}
+			teams.found[parent] = run.Lookup{Outcome: run.LookupNotFound}
+			w.reopen()
+			w.wait(run.ResendAfter)
+			e = w.engine(teams)
+			res := w.resume(e)
+			want := map[string]review.EntryState{parent: review.Unknown, child: wantChild, grandchild: review.Pending, independent: review.Done}
+			if res.Info.State != review.Interrupted || !maps(states(res.Record), want) || len(r.objects) != 2 {
+				t.Fatalf("resume after lookup miss: run %s, states %v, writes %v", res.Info.State, states(res.Record), r.objects)
+			}
+			once(t, r, parent, independent)
+			teams.found[parent] = run.Lookup{Outcome: run.LookupFound, JSM: pdRef("jsm-recovered-team")}
+			w.reopen()
+			allDone(t, w.resume(w.engine(teams)))
+			once(t, r, wantCalls...)
+			if !slices.Equal(teams.applied, wantCalls) {
+				t.Errorf("calls %v, want %v in dependency order", teams.applied, wantCalls)
+			}
+		})
+	}
+}
+
+func TestResumeWillNotSkipAnOlderCreateWithMissingReceiptHistory(t *testing.T) {
+	ctx := context.Background()
+	w := newWorkspace(t)
+	r := &remote{objects: map[string]int{}}
+	const key = "teams/T1"
+	teams := &answerStep{fakeStep: newStep("teams", r), objects: map[string]*review.Ref{key: nil}, omitStatus: true}
+	teams.plan = teamsPlan("T1")
+	e := w.engine(teams)
+	res := w.apply(e, w.plan(e).Version)
+	if res.Info.State != review.Interrupted {
+		t.Fatalf("apply: %s", res.Info.State)
+	}
+	// The earlier build replaced the acknowledgement on a lookup miss.
+	if _, err := w.st.DB().ExecContext(ctx, `UPDATE journal SET messages = NULL WHERE run_id = ?`, res.Info.ID); err != nil {
+		t.Fatal(err)
+	}
+	w.reopen()
+	w.wait(run.ResendAfter)
+	e = w.engine(teams)
+	teams.found[key] = run.Lookup{Outcome: run.LookupNotFound}
+	if res := w.resume(e); res.Info.State != review.Interrupted {
+		t.Fatalf("resume after a lookup miss: %s", res.Info.State)
+	}
+	if _, err := e.Resume(ctx, key); messagesExit(err) != messages.ExitValidationFailed ||
+		!strings.Contains(err.Error(), "lacks the receipt history") {
+		t.Fatalf("skipping without receipt history: %v", err)
+	}
+	teams.found[key] = run.Lookup{Outcome: run.LookupFound, JSM: pdRef("jsm-recovered")}
+	allDone(t, w.resume(e))
+	once(t, r, key)
+}
+
+func TestResumeUsesTheRunsSnapshotFormat(t *testing.T) {
+	ctx := context.Background()
+	w := newWorkspace(t)
+	r := &remote{objects: map[string]int{}}
+	teams := newStep("teams", r)
+	teams.plan = teamsPlan("T1")
+	e := w.engine(&versionedStep{fakeStep: teams, version: 1})
+	stop := make(chan struct{})
+	close(stop)
+	e.Interrupted = stop
+	if res := w.apply(e, w.plan(e).Version); res.Info.State != review.Paused {
+		t.Fatalf("apply: %s", res.Info.State)
+	}
+	e.Interrupted = nil
+	other := w.engine(&versionedStep{fakeStep: teams, version: 2})
+	if _, err := other.Read(ctx, review.JSM); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := other.Resume(ctx); messagesExit(err) != messages.ExitValidationFailed || res.Info.State != review.Paused {
+		t.Errorf("resume with newer format: run %s, error %v", res.Info.State, err)
+	}
+	if len(r.objects) != 0 || len(teams.looked) != 0 {
+		t.Fatalf("writes %v, lookups %v on incompatible resume", r.objects, teams.looked)
+	}
+	allDone(t, w.resume(e))
+	once(t, r, "teams/T1")
 }
 
 // resume writes again what a crash cut short: the run record, and the

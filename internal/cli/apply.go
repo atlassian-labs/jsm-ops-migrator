@@ -23,7 +23,8 @@ import (
 // ExitValidationFailed. Without a terminal, the acceptance file is the
 // confirmation, and its absence exits with ExitAwaitingInput. The pre-flight
 // checks run again first, because a credential can expire between plan and
-// apply.
+// apply, and one of the checks apply writes with that could not run stops it
+// before anything is written.
 //
 // A run whose items do not all end done exits with ExitPartial: the run
 // carried on past each failure, and its record says what is left. So does a
@@ -54,6 +55,7 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 	if err != nil {
 		return err
 	}
+	e.Redactor = creds.set.Redactor()
 	if err := e.CheckPlan(ctx, v); err != nil {
 		return fmt.Errorf("apply: %w", err)
 	}
@@ -73,10 +75,16 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 		if e.Steps, err = env.Steps(creds.set); err != nil {
 			return err
 		}
-		if err := e.CheckPlanSteps(v); err != nil {
+		if err := e.CheckPlanSteps(ctx, v); err != nil {
 			return err
 		}
 		template := filepath.Join(env.Workspace.ArtifactsDir(), v.Dir, review.AcceptanceTemplateFile)
+		if _, err := os.Stat(template); errors.Is(err, os.ErrNotExist) {
+			return messages.ValidationFailed(fmt.Errorf("apply: %s is missing; run plan again, which writes a new version with every file",
+				displayPath(template)))
+		} else if err != nil {
+			return err
+		}
 		return awaitingInput(fmt.Errorf("apply: plan v%d needs a confirmation: fill in %s and give it with --accept-file",
 			v.Version, displayPath(template)))
 	}
@@ -91,7 +99,7 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 			return err
 		}
 	}
-	if err := checksError("apply", report); err != nil {
+	if err := writePreflightError("apply", report); err != nil {
 		env.summarize(checksSummary(report.Checks))
 		return out.emit(env, err)
 	}
@@ -108,7 +116,7 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 	if e.Steps, err = env.Steps(creds.set); err != nil {
 		return out.emit(env, err)
 	}
-	if err := e.CheckPlanSteps(v); err != nil {
+	if err := e.CheckPlanSteps(ctx, v); err != nil {
 		return out.emit(env, err)
 	}
 	pv := planResult(env.Workspace, engine.PlanResult{Version: v})
@@ -165,6 +173,34 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 	res, err := e.Apply(ctx, v, c)
 	view.close()
 	return finishRun(env, "apply", out, res, err)
+}
+
+// writeNeeds are the checks apply and resume write on: the API token makes every call,
+// and the others identify the accounts the plan was made for and the
+// operator the confirmation names. The checks of the plan, the clock and the
+// APIs still being built keep their warnings: no call depends on them alone.
+var writeNeeds = []preflight.ID{preflight.PagerDutyKey, preflight.Site, preflight.AtlassianToken, preflight.OrgKey, preflight.OrgAdmin}
+
+// writePreflightError also rejects required checks that could not run.
+func writePreflightError(command string, report preflight.Report) error {
+	if err := checksError(command, report); err != nil {
+		return err
+	}
+	var titles []string
+	for _, id := range writeNeeds {
+		if c, ok := report.Find(id); !ok || (c.Status != preflight.OK && c.Status != preflight.Warning) {
+			titles = append(titles, id.Title())
+		}
+	}
+	if len(titles) == 0 {
+		return nil
+	}
+	again := "they can"
+	if len(titles) == 1 {
+		again = "it can"
+	}
+	return fmt.Errorf("%s: nothing was written, because %s could not run: %s; run %s again once %s",
+		command, count(len(titles), "check"), strings.Join(titles, ", "), command, again)
 }
 
 // askReasons asks for a reason for each warning of the plan, as the
@@ -234,14 +270,16 @@ func (o applyOutput) emit(env *Env, err error) error {
 	return err
 }
 
-// runOutput is a run as apply reports it. NotDone are the messages of the
-// items that did not end done, cleaned as in the run record.
+// runOutput is a run as apply reports it. Counts are null when the journal
+// could not be read, so nothing is known about the items, and Record is left
+// out when the run record could not be written. NotDone are the messages of
+// the items that did not end done, cleaned as in the run record.
 type runOutput struct {
 	ID          string             `json:"id"`
 	PlanVersion int                `json:"plan_version"`
 	State       review.RunState    `json:"state"`
-	Counts      runCounts          `json:"counts"`
-	Record      string             `json:"record"`
+	Counts      *runCounts         `json:"counts"`
+	Record      string             `json:"record,omitempty"`
 	NotDone     []messages.Message `json:"not_done,omitempty"`
 }
 
@@ -255,13 +293,16 @@ type runCounts struct {
 }
 
 func runResult(ws *store.Workspace, res engine.RunResult) *runOutput {
-	c := res.Record.Counts()
-	out := &runOutput{
-		ID: res.Info.ID, PlanVersion: res.Info.PlanVersion, State: res.Info.State,
-		Counts: runCounts{Total: res.Info.Total, Done: c.Done, Failed: c.Failed, Unknown: c.Unknown,
-			Declined: c.Declined, Pending: res.Info.Total - c.Done - c.Failed - c.Unknown - c.Declined},
-		Record: filepath.Join(ws.ArtifactsDir(), res.Info.Record),
+	out := &runOutput{ID: res.Info.ID, PlanVersion: res.Info.PlanVersion, State: res.Info.State}
+	if res.RecordWritten {
+		out.Record = filepath.Join(ws.ArtifactsDir(), res.Info.Record)
 	}
+	if res.Record.ID == "" {
+		return out
+	}
+	c := res.Record.Counts()
+	out.Counts = &runCounts{Total: res.Info.Total, Done: c.Done, Failed: c.Failed, Unknown: c.Unknown,
+		Declined: c.Declined, Pending: res.Info.Total - c.Done - c.Failed - c.Unknown - c.Declined}
 	for _, e := range res.Record.Entries {
 		if e.State == review.Done {
 			continue
@@ -281,11 +322,7 @@ const maxNotDone = 20
 
 func writeRun(w io.Writer, r *runOutput) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\nRun %s of plan v%d: %d of %d items done", r.ID, r.PlanVersion, r.Counts.Done, r.Counts.Total)
-	if rest := notDone(r.Counts); rest != "" {
-		b.WriteString("; " + rest)
-	}
-	b.WriteString(".\n")
+	b.WriteString("\n" + runLine(r) + ".\n")
 	if len(r.NotDone) > 0 {
 		b.WriteString("\nNot done:\n")
 		if err := messages.WriteText(&b, r.NotDone[:min(len(r.NotDone), maxNotDone)]); err != nil {
@@ -295,9 +332,26 @@ func writeRun(w io.Writer, r *runOutput) error {
 			fmt.Fprintf(&b, "  and %d more\n", len(r.NotDone)-maxNotDone)
 		}
 	}
-	fmt.Fprintf(&b, "Record: %s (with run.json and mapping.csv beside it).\n", displayPath(r.Record))
+	if r.Record == "" {
+		b.WriteString("The run record could not be written; state.db keeps every result.\n")
+	} else {
+		fmt.Fprintf(&b, "Record: %s (with run.json and mapping.csv beside it).\n", displayPath(r.Record))
+	}
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// runLine says how far the run got: "Run <id> of plan v1: 1 of 2 items done;
+// 1 failed".
+func runLine(r *runOutput) string {
+	if r.Counts == nil {
+		return fmt.Sprintf("Run %s of plan v%d: its journal could not be read, so what it did is not known", r.ID, r.PlanVersion)
+	}
+	line := fmt.Sprintf("Run %s of plan v%d: %d of %d items done", r.ID, r.PlanVersion, r.Counts.Done, r.Counts.Total)
+	if rest := notDone(*r.Counts); rest != "" {
+		line += "; " + rest
+	}
+	return line
 }
 
 // notDone says how many items are not done, by state: "2 failed, 1 unknown".
@@ -315,11 +369,10 @@ func notDone(c runCounts) string {
 }
 
 func runSummary(r *runOutput) []string {
-	line := fmt.Sprintf("Run %s of plan v%d: %d of %d items done", r.ID, r.PlanVersion, r.Counts.Done, r.Counts.Total)
-	if rest := notDone(r.Counts); rest != "" {
-		line += "; " + rest
+	if r.Record == "" {
+		return []string{runLine(r), "The run record could not be written"}
 	}
-	return []string{line, "Record: " + displayPath(r.Record)}
+	return []string{runLine(r), "Record: " + displayPath(r.Record)}
 }
 
 func have(n int) string {
@@ -332,6 +385,9 @@ func have(n int) string {
 // runError is the command's error for a run: nil when every item is done,
 // and otherwise one that exits with ExitPartial.
 func runError(command string, r *runOutput) error {
+	if r.Counts == nil {
+		return messages.PartiallyComplete(fmt.Errorf("%s: the journal of run %s could not be read, so what it did is not known", command, r.ID))
+	}
 	switch {
 	case r.State == review.Interrupted && r.Counts.Pending == 0 && r.Counts.Unknown > 0:
 		return messages.PartiallyComplete(fmt.Errorf("%s: %s an unknown outcome, so run %s is unfinished; "+
@@ -342,7 +398,7 @@ func runError(command string, r *runOutput) error {
 			command, r.ID, r.State, r.Counts.Total-r.Counts.Pending, r.Counts.Total))
 	case r.Counts.Done < r.Counts.Total:
 		return messages.PartiallyComplete(fmt.Errorf("%s: %d of %d items are not done (%s); see %s",
-			command, r.Counts.Total-r.Counts.Done, r.Counts.Total, notDone(r.Counts), displayPath(r.Record)))
+			command, r.Counts.Total-r.Counts.Done, r.Counts.Total, notDone(*r.Counts), displayPath(r.Record)))
 	}
 	return nil
 }

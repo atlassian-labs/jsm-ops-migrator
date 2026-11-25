@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/discover"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
@@ -433,7 +434,8 @@ func TestAnUnknownOutcomeIsLookedUpOnce(t *testing.T) {
 		if e.Key == "teams/T1" && (e.JSM == nil || e.JSM.ID != "jsm-found") {
 			t.Errorf("T1's JSM object %+v", e.JSM)
 		}
-		if e.Key == "teams/T2" && (len(e.Messages) != 1 || e.Messages[0].Class != messages.ManualTask) {
+		if e.Key == "teams/T2" && (len(e.Messages) != 2 || e.Messages[0].Class != messages.ManualTask ||
+			e.Messages[1].Code != "create_without_receipt") {
 			t.Errorf("T2's messages %+v", e.Messages)
 		}
 	}
@@ -716,7 +718,7 @@ func TestLookupsUseTheLatestJSMRead(t *testing.T) {
 	if !second.Unchanged {
 		t.Fatalf("the plan changed: %+v", second)
 	}
-	latest, err := discover.LatestComplete(context.Background(), w.st, review.JSM)
+	latest, err := discover.LatestComplete(context.Background(), w.st, review.JSM, []discover.Reader{teams})
 	if err != nil || latest.ID() == first.JSMRead {
 		t.Fatalf("LatestComplete = %v, %v", latest, err)
 	}
@@ -828,6 +830,314 @@ func TestUnboundReadsAndMappingsFromOlderWorkspaces(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// answerStep answers the calls named in objects with the JSM object given
+// there instead: nil for none.
+type answerStep struct {
+	*fakeStep
+	objects          map[string]*review.Ref
+	omitStatus       bool
+	responseMessages []messages.Message
+}
+
+func (s *answerStep) Apply(ctx context.Context, it review.Item, deps run.Results) (run.Outcome, error) {
+	out, err := s.fakeStep.Apply(ctx, it, deps)
+	if ref, ok := s.objects[it.Key]; ok {
+		out.JSM = ref
+	}
+	if s.omitStatus {
+		out.Status = 0
+	}
+	out.Messages = append(out.Messages, s.responseMessages...)
+	return out, err
+}
+
+// Third review: a create that answered without naming the JSM object it made
+// was recorded done with no mapping, so the next plan planned it again and
+// the next apply created a second one. Such a create is looked up, as an
+// unknown outcome is, and stays unknown, keeping the run unfinished, until
+// something names what it made. An object the record cannot hold is the
+// same: nothing is mapped, and the run is unfinished.
+func TestACreateThatNamesNoObjectIsLookedUp(t *testing.T) {
+	ctx := context.Background()
+	w := newWorkspace(t)
+	r := &remote{objects: map[string]int{}}
+	teams := &answerStep{fakeStep: newStep("teams", r), objects: map[string]*review.Ref{
+		"teams/T1": nil, "teams/T2": nil, "teams/T3": {Type: "team", ID: "two words"}, "teams/T4-ops": nil,
+	}}
+	teams.plan = func(in run.PlanInput) (run.Planned, error) {
+		p, err := teamsPlan("T1", "T2", "T3")(in)
+		// A call that links no PagerDuty object needs no JSM object to map.
+		p.Items = append(p.Items, review.Item{Key: "teams/T4-ops", Action: review.Create, Summary: "Turn on Operations"})
+		return p, err
+	}
+	teams.found["teams/T1"] = run.Lookup{Outcome: run.LookupFound, JSM: &review.Ref{Type: "team", ID: "jsm-found"}}
+	e := w.engine(teams)
+	res := w.apply(e, w.plan(e).Version)
+
+	want := map[string]review.EntryState{"teams/T1": review.Done, "teams/T2": review.Unknown,
+		"teams/T3": review.Unknown, "teams/T4-ops": review.Done}
+	if got := states(res.Record); !maps(got, want) {
+		t.Errorf("states %v, want %v", got, want)
+	}
+	if !slices.Equal(teams.looked, []string{"teams/T1", "teams/T2"}) {
+		t.Errorf("lookups %v, want the two creates that named no object", teams.looked)
+	}
+	codes := map[string]string{}
+	for _, e := range res.Record.Entries {
+		for _, m := range e.Messages {
+			codes[e.Key] += m.Code + " "
+		}
+		if e.Key == "teams/T2" && (len(e.Messages) != 1 || e.Messages[0].Class != messages.ManualTask) {
+			t.Errorf("T2's messages %+v", e.Messages)
+		}
+	}
+	if codes["teams/T1"] != "object_found " || codes["teams/T2"] != "object_unidentified " ||
+		codes["teams/T3"] != "object_unrecorded " || codes["teams/T4-ops"] != "" {
+		t.Errorf("messages %v", codes)
+	}
+	if res.Info.State != review.Interrupted || !res.Info.EndedAt.IsZero() {
+		t.Errorf("run %s, ended %v; want interrupted, not ended", res.Info.State, res.Info.EndedAt)
+	}
+	rows, err := w.st.DB().QueryContext(ctx, `SELECT pagerduty_id, jsm_id FROM mappings ORDER BY pagerduty_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var mapped []string
+	for rows.Next() {
+		var pd, jsm string
+		if err := rows.Scan(&pd, &jsm); err != nil {
+			t.Fatal(err)
+		}
+		mapped = append(mapped, pd+"="+jsm)
+	}
+	if !slices.Equal(mapped, []string{"T1=jsm-found"}) {
+		t.Errorf("mappings %v, want only the one the lookup found", mapped)
+	}
+	pd, _ := e.LatestRead(ctx, review.PagerDuty)
+	jsm, _ := e.LatestRead(ctx, review.JSM)
+	if _, err := e.Plan(ctx, pd, jsm); !errors.Is(err, run.ErrUnfinishedRun) {
+		t.Errorf("plan after a create that named no object: %v", err)
+	}
+	for key, n := range r.objects {
+		if n != 1 {
+			t.Errorf("%s was sent %d times", key, n)
+		}
+	}
+}
+
+// Third review: a credential pasted into a reason has no label for a pattern
+// to find, so confirmation.md kept it as typed. The reasons are cleaned once,
+// with the credentials of the invocation, and the same cleaned confirmation
+// is sealed in state.db and written as confirmation.md.
+func TestAKnownCredentialInAReasonIsNeverKept(t *testing.T) {
+	const token = "Zq7vR2mK9pL4xW8n" // a bare value no pattern finds
+	if credentials.RedactText(token) != token {
+		t.Fatal("the patterns find the token; the test needs one they do not")
+	}
+	w := newWorkspace(t)
+	teams := newStep("teams", &remote{objects: map[string]int{}})
+	teams.plan = func(run.PlanInput) (run.Planned, error) {
+		return run.Planned{
+			Items:    []review.Item{{Key: "teams/T1", Action: review.Create, Summary: "Create Platform"}},
+			Messages: []messages.Message{{Class: messages.Warning, Code: "member_dropped", Item: "teams/T1", Text: "Casey is not migrated."}},
+		}, nil
+	}
+	e := w.engine(teams)
+	e.Redactor = credentials.NewRedactor(credentials.NewSecret(token))
+	v := w.plan(e).Version
+	c := confirmation(v)
+	c.Accepted[0].Reason = "approved with " + token
+	if _, err := e.Apply(context.Background(), v, c); err != nil {
+		t.Fatal(err)
+	}
+	conf, err := os.ReadFile(filepath.Join(w.ws.ArtifactsDir(), v.Dir, review.ConfirmationFile))
+	// Markdown shows the brackets of [redacted] escaped.
+	if err != nil || bytes.Contains(conf, []byte(token)) || !bytes.Contains(conf, []byte(`approved with \[redacted\]`)) {
+		t.Errorf("confirmation.md: %v\n%s", err, conf)
+	}
+	var sealed []byte
+	if err := w.st.DB().QueryRow(`SELECT record FROM confirmations WHERE plan_version = ?`, v.Version).Scan(&sealed); err != nil {
+		t.Fatal(err)
+	}
+	record, err := w.st.Cipher().Open(store.FieldRef{Table: "confirmations", Item: "v1", Column: "record"}, sealed)
+	if err != nil || bytes.Contains(record, []byte(token)) || !bytes.Contains(record, []byte("approved with "+credentials.Redacted)) {
+		t.Errorf("the sealed confirmation: %v\n%s", err, record)
+	}
+}
+
+// versionedStep is a step whose part of a read is in the given format.
+type versionedStep struct {
+	*fakeStep
+	version int
+}
+
+func (s *versionedStep) ReadVersion() int { return s.version }
+
+// Third review: a read was reused by side alone, so once a build gained a
+// step, plan --only took a JSM read made without it as proof that JSM has
+// none of that step's objects. A read records the steps that made it and
+// the format of each, and only the same steps reuse it.
+func TestAReadIsReusedOnlyByTheStepsThatMadeIt(t *testing.T) {
+	ctx := context.Background()
+	w := newWorkspace(t)
+	before := w.engine(run.Placeholders()...)
+	first := w.plan(before).Version
+
+	teams := newStep("teams", &remote{objects: map[string]int{}})
+	teams.reads[review.JSM] = []object{{"team", "jsm-1", map[string]string{"name": "Platform"}}}
+	after := w.engine(append(run.Placeholders(), teams)...)
+	for _, side := range []review.Side{review.PagerDuty, review.JSM} {
+		if s, err := after.LatestRead(ctx, side); err != nil || s != nil {
+			t.Errorf("%s: a read made without the teams step was reused: %v, %v", side, s, err)
+		}
+	}
+	fresh, err := after.Read(ctx, review.JSM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, err := after.LatestRead(ctx, review.JSM); err != nil || s == nil || s.ID() != fresh.ID() {
+		t.Errorf("the read of the same steps: %v, %v; want read %d", s, err, fresh.ID())
+	}
+	// The steps that made the first read still reuse it.
+	if s, err := before.LatestRead(ctx, review.JSM); err != nil || s == nil || s.ID() != first.JSMRead {
+		t.Errorf("the placeholder's own read: %v, %v; want read %d", s, err, first.JSMRead)
+	}
+	// A step that changes the format of what it reads starts afresh too.
+	newer := w.engine(append(run.Placeholders(), &versionedStep{fakeStep: teams, version: 2})...)
+	if s, err := newer.LatestRead(ctx, review.JSM); err != nil || s != nil {
+		t.Errorf("a read in the older format was reused: %v, %v", s, err)
+	}
+}
+
+// The same holds for the read apply's lookups compare with: a newer complete
+// JSM read made by other steps says nothing about what this plan's steps
+// would find, so the lookups use the plan's own.
+func TestLookupsUseOnlyAReadOfTheSameSteps(t *testing.T) {
+	ctx := context.Background()
+	w := newWorkspace(t)
+	teams := newStep("teams", &remote{objects: map[string]int{}})
+	teams.plan = teamsPlan("T1")
+	e := w.engine(teams)
+	v := w.plan(e).Version
+	other, err := w.engine(teams, newStep("users", &remote{objects: map[string]int{}})).Read(ctx, review.JSM)
+	if err != nil || other.ID() <= v.JSMRead || !other.Complete() {
+		t.Fatalf("the other steps' read: %v, %v", other, err)
+	}
+	teams.errs["teams/T1"] = fmt.Errorf("POST /v1/teams: %w: %w", httperr.ErrUnknownOutcome, httperr.ErrUnavailable)
+	res := w.apply(e, v)
+	if res.Info.JSMRead != v.JSMRead || !slices.Equal(teams.lookedIn, []int64{v.JSMRead}) {
+		t.Errorf("the run compares with read %d and looked up in %v, want %d", res.Info.JSMRead, teams.lookedIn, v.JSMRead)
+	}
+}
+
+func TestApplyRequiresAPlanWithMatchingSnapshotCoverage(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			ctx := context.Background()
+			w := newWorkspace(t)
+			r := &remote{objects: map[string]int{}}
+			teams := newStep("teams", r)
+			teams.plan = teamsPlan("T1")
+			old := w.engine(&versionedStep{fakeStep: teams, version: 1})
+			v := w.plan(old).Version
+			if legacy {
+				if _, err := w.st.DB().Exec(`UPDATE snapshot_reads SET readers = NULL`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			current := w.engine(&versionedStep{fakeStep: teams, version: 2})
+			if _, err := current.Read(ctx, review.JSM); err != nil {
+				t.Fatal(err)
+			}
+			res, err := current.Apply(ctx, v, confirmation(v))
+			if messagesExit(err) != messages.ExitValidationFailed || res.Info.ID != "" || len(r.objects) != 0 {
+				t.Fatalf("apply incompatible plan: run %s, writes %v, error %v", res.Info.ID, r.objects, err)
+			}
+			fresh := w.plan(current)
+			if fresh.Unchanged || fresh.Version.Version != v.Version+1 {
+				t.Fatalf("replan kept an incompatible plan: %+v", fresh)
+			}
+			allDone(t, w.apply(current, fresh.Version))
+			once(t, r, "teams/T1")
+		})
+	}
+}
+
+// Third review: when the run record could not be written, apply returned an
+// empty record, so the command reported every call it had made as not taken
+// yet. The record is rebuilt from the journal, which has every result, and
+// says that its files were not written.
+func TestARecordThatCannotBeWrittenStillSaysWhatTheRunDid(t *testing.T) {
+	w := newWorkspace(t)
+	s := newStep("teams", &remote{objects: map[string]int{}})
+	s.plan = teamsPlan("T1", "T2")
+	e := w.engine(s)
+	v := w.plan(e).Version
+	if err := os.WriteFile(filepath.Join(w.ws.ArtifactsDir(), "runs"), []byte("unwritable report directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Apply(context.Background(), v, confirmation(v))
+	if err == nil {
+		t.Fatal("expected the record write to fail")
+	}
+	want := map[string]review.EntryState{"teams/T1": review.Done, "teams/T2": review.Done}
+	if got := states(res.Record); res.Record.ID != res.Info.ID || !maps(got, want) || res.RecordWritten {
+		t.Errorf("record %s, states %v, written %v; want %s, %v, not written", res.Record.ID, got, res.RecordWritten, res.Info.ID, want)
+	}
+
+	// A run that cannot start its calls has made none.
+	w2 := newWorkspace(t)
+	e2 := w2.engine(newStep("teams", &remote{objects: map[string]int{}}))
+	e2.Steps[0].(*fakeStep).plan = teamsPlan("T1")
+	v2 := w2.plan(e2).Version
+	if err := os.Mkdir(filepath.Join(w2.ws.Dir(), run.ActiveRunFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w2.ws.Dir(), run.ActiveRunFile, "x"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err = e2.Apply(context.Background(), v2, confirmation(v2))
+	if err == nil {
+		t.Fatal("expected active-run.json to fail")
+	}
+	if got := states(res.Record); res.Record.ID != res.Info.ID || !maps(got, map[string]review.EntryState{"teams/T1": review.Pending}) {
+		t.Errorf("record %s, states %v; want every item pending", res.Record.ID, got)
+	}
+}
+
+// Third review: plan reused the latest version when its plan.json was there
+// and unchanged, whatever else of its folder was missing, so a lost
+// acceptance-template.yaml stayed lost and apply kept pointing at it. A
+// version missing any review file is written anew, as one missing plan.json
+// is.
+func TestAVersionMissingAReviewFileIsWrittenAnew(t *testing.T) {
+	for _, f := range review.PlanFiles {
+		t.Run(f, func(t *testing.T) {
+			w := newWorkspace(t)
+			s := newStep("teams", &remote{objects: map[string]int{}})
+			s.plan = teamsPlan("T1")
+			e := w.engine(s)
+			v := w.plan(e).Version
+			if err := os.Remove(filepath.Join(w.ws.ArtifactsDir(), v.Dir, f)); err != nil {
+				t.Fatal(err)
+			}
+			next := w.plan(e)
+			if next.Unchanged || next.Version.Version != 2 {
+				t.Fatalf("the plan after %s went missing: %+v", f, next)
+			}
+			for _, g := range review.PlanFiles {
+				if !exists(t, filepath.Join(w.ws.ArtifactsDir(), next.Version.Dir, g)) {
+					t.Errorf("v2 has no %s", g)
+				}
+			}
+			if again := w.plan(e); !again.Unchanged || again.Version.Version != 2 {
+				t.Errorf("a complete version was not kept: %+v", again)
 			}
 		})
 	}

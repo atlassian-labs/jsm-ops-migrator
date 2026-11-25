@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -107,17 +108,18 @@ func interrupted(env *Env) bool {
 // finishRun reports a run that apply or resume made: in text, its counts
 // and what is not done; in JSON, as part of the command's one document.
 func finishRun(env *Env, command string, out applyOutput, res engine.RunResult, err error) error {
-	if res.Info.ID != "" {
-		out.Run = runResult(env.Workspace, res)
-	}
-	if err != nil {
+	if err != nil && res.Info.ID == "" {
 		return out.emit(env, fmt.Errorf("%s: %w", command, err))
 	}
+	out.Run = runResult(env.Workspace, res)
 	if env.Output == OutputText {
-		if err := writeRun(env.Stdout, out.Run); err != nil {
-			return err
+		if werr := writeRun(env.Stdout, out.Run); werr != nil {
+			return errors.Join(err, werr)
 		}
 	}
 	env.summarize(runSummary(out.Run))
+	if err != nil {
+		return out.emit(env, fmt.Errorf("%s: %w", command, err))
+	}
 	return out.emit(env, runError(command, out.Run))
 }

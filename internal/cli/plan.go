@@ -106,8 +106,8 @@ func runPlan(ctx context.Context, env *Env, f PlanFlags) error {
 			return out.emit(env, err)
 		}
 		if s == nil {
-			return out.emit(env, fmt.Errorf("plan --only %s: there is no %s read to build on yet; run 'jsm-ops-migrator plan' without --only first",
-				f.Only, side.Label()))
+			return out.emit(env, fmt.Errorf("plan --only %s: there is no %s read to build on yet, as only one made by this build's steps "+
+				"can be; run 'jsm-ops-migrator plan' without --only first", f.Only, side.Label()))
 		}
 		reads[side] = s
 		out.Reads = append(out.Reads, readResult(s, true))

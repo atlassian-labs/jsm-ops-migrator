@@ -129,3 +129,78 @@ func TestSchemaTooNewAndFailingMigration(t *testing.T) {
 		t.Error("the failing migration was partly applied")
 	}
 }
+
+func TestReadCoverageUpgradePreservesLegacyUnfinishedWrites(t *testing.T) {
+	ctx := context.Background()
+	current := embedded(t)
+	legacy := fstest.MapFS{}
+	for _, name := range []string{"0001_foundation.sql", "0002_run_engine.sql", "0003_migration_accounts.sql"} {
+		data, err := fs.ReadFile(current, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy[name] = &fstest.MapFile{Data: data}
+	}
+	for _, tc := range []struct {
+		name, state string
+		calls       int
+		blocked     bool
+	}{
+		{"unfinished write run", "paused", 1, true},
+		{"completed write run", "completed", 1, false},
+		{"unfinished no-op run", "interrupted", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws, err := OpenWorkspace(t.TempDir(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prior, err := open(ctx, ws, staticProvider{}, OpenCreate, legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stmt := range []struct {
+				sql  string
+				args []any
+			}{
+				{sql: `INSERT INTO snapshot_reads(id, side, started_at) VALUES (1, 'jsm', 'time')`},
+				{`INSERT INTO plan_versions(version, hash, content_hash, created_at, calls, blockers, warnings, dir, plan)
+					VALUES (1, 'hash', 'content', 'time', ?, 0, 0, 'v1', x'00')`, []any{tc.calls}},
+				{sql: `INSERT INTO confirmations(plan_version, confirmed_at, account_id, via, record)
+					VALUES (1, 'time', 'account', 'file', x'00')`},
+				{`INSERT INTO runs(id, plan_version, state, started_at, total, record, jsm_read)
+					VALUES ('legacy-run', 1, ?, 'time', ?, 'run.md', 1)`, []any{tc.state, tc.calls}},
+			} {
+				if _, err := prior.DB().ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
+					_ = prior.Close()
+					t.Fatal(err)
+				}
+			}
+			if err := prior.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if tc.blocked {
+				if _, err := open(ctx, ws, staticProvider{}, OpenExisting, current); !errors.Is(err, ErrUnfinishedRunBeforeUpgrade) ||
+					!strings.Contains(err.Error(), "legacy-run") {
+					t.Fatalf("upgrading an unfinished run: %v", err)
+				}
+				prior, err := open(ctx, ws, staticProvider{}, OpenExisting, legacy)
+				if err != nil {
+					t.Fatalf("original build cannot reopen the workspace: %v", err)
+				}
+				_, done := prior.DB().ExecContext(ctx, `UPDATE runs SET state = 'completed' WHERE id = 'legacy-run'`)
+				if err := errors.Join(done, prior.Close()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			upgraded, err := open(ctx, ws, staticProvider{}, OpenExisting, current)
+			if err != nil {
+				t.Fatalf("upgrading a workspace without an unfinished write run: %v", err)
+			}
+			defer func() { _ = upgraded.Close() }()
+			if upgraded.SchemaVersion() <= len(legacy) {
+				t.Fatalf("schema version %d did not advance", upgraded.SchemaVersion())
+			}
+		})
+	}
+}

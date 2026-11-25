@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/discover"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
@@ -28,6 +29,9 @@ type Engine struct {
 	Accounts map[review.Side]review.MigrationAccount
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// Redactor knows the credentials of the invocation, so a reason that
+	// holds one is cleaned of it; nil applies the pattern rules only.
+	Redactor *credentials.Redactor
 	// Interrupted is closed when the operator asks a run to stop after the
 	// call it is making, at the first Ctrl+C. pause asks the same of the run
 	// through pause-request.json.
@@ -73,22 +77,28 @@ func (e *Engine) step(name string) Step {
 	return nil
 }
 
+// readers are the steps as the reads see them.
+func (e *Engine) readers() []discover.Reader {
+	readers := make([]discover.Reader, len(e.Steps))
+	for i, s := range e.Steps {
+		readers[i] = s
+	}
+	return readers
+}
+
 // Read reads one side with every step; see discover.Read.
 func (e *Engine) Read(ctx context.Context, side review.Side) (*discover.Snapshot, error) {
 	if err := e.checkSteps(); err != nil {
 		return nil, err
 	}
-	readers := make([]discover.Reader, len(e.Steps))
-	for i, s := range e.Steps {
-		readers[i] = s
-	}
-	return discover.Read(ctx, e.Store, side, e.Accounts[side], readers, e.now)
+	return discover.Read(ctx, e.Store, side, e.Accounts[side], e.readers(), e.now)
 }
 
-// LatestRead returns the latest finished read of side, or nil when there is
-// none, for plan --only, which reads one side again and reuses the other.
+// LatestRead returns the latest finished read of side that these steps made,
+// or nil when there is none, for plan --only, which reads one side again and
+// reuses the other.
 func (e *Engine) LatestRead(ctx context.Context, side review.Side) (*discover.Snapshot, error) {
-	return discover.Latest(ctx, e.Store, side)
+	return discover.Latest(ctx, e.Store, side, e.readers())
 }
 
 // ErrUnfinishedRun means a run has not ended: plan and apply refuse until it

@@ -46,6 +46,8 @@ var (
 	ErrSchemaTooNew = errors.New("state.db was written by a newer jsm-ops-migrator; upgrade it first")
 	// ErrSchemaMismatch means a shared open found a different schema version.
 	ErrSchemaMismatch = errors.New("state.db schema version does not match this jsm-ops-migrator")
+	// ErrUnfinishedRunBeforeUpgrade preserves the schema the run can use.
+	ErrUnfinishedRunBeforeUpgrade = errors.New("an unfinished run must be reconciled before upgrading this workspace")
 	// ErrKeyUnavailable means the data key could not be unwrapped, so
 	// state.db cannot be read.
 	ErrKeyUnavailable = errors.New("state.db's key is not available")
@@ -427,6 +429,12 @@ func applyMigrations(ctx context.Context, db *sql.DB, migrations []migration, cu
 		if err != nil {
 			return err
 		}
+		if m.name == "0004_read_coverage.sql" {
+			if err := checkReadCoverageUpgrade(ctx, tx); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("migration %s: %w", m.name, err)
@@ -441,4 +449,21 @@ func applyMigrations(ctx context.Context, db *sql.DB, migrations []migration, cu
 		}
 	}
 	return nil
+}
+
+// Old snapshots do not say which build can read them. Keep the prior schema
+// usable until the operator has reconciled its open write run.
+func checkReadCoverageUpgrade(ctx context.Context, tx *sql.Tx) error {
+	var id string
+	err := tx.QueryRowContext(ctx, `SELECT runs.id FROM runs
+		JOIN plan_versions ON runs.plan_version = plan_versions.version
+		WHERE runs.state <> 'completed' AND plan_versions.calls > 0
+		ORDER BY plan_versions.version LIMIT 1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking unfinished runs before the read-coverage upgrade: %w", err)
+	}
+	return fmt.Errorf("%w: reconcile run %s with the build that started it, then retry the upgrade", ErrUnfinishedRunBeforeUpgrade, id)
 }
