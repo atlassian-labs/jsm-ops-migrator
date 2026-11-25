@@ -34,7 +34,7 @@ func (w *workspace) activeRun() run.ActiveRun {
 
 func (w *workspace) resume(e *run.Engine) run.RunResult {
 	w.t.Helper()
-	res, err := e.Resume(context.Background(), "")
+	res, err := e.Resume(context.Background())
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestResumeLooksUpBeforeItSendsAgain(t *testing.T) {
 	if len(teams.applied) != 0 || !slices.Equal(teams.looked, []string{"teams/T3"}) {
 		t.Errorf("calls %v, lookups %v", teams.applied, teams.looked)
 	}
-	if _, err := e.Resume(context.Background(), ""); !errors.Is(err, run.ErrNothingToResume) {
+	if _, err := e.Resume(context.Background()); !errors.Is(err, run.ErrNothingToResume) {
 		t.Errorf("a resume after the run completed: %v", err)
 	}
 }
@@ -392,7 +392,7 @@ func TestResumeSendsACallAtMostMaxAttemptsTimes(t *testing.T) {
 		t.Errorf("T1's journal rows %v", states)
 	}
 	w.wait(10 * run.ResendAfter)
-	if _, err := e.Resume(context.Background(), ""); !errors.Is(err, run.ErrNothingToResume) || r.objects["teams/T1"] != run.MaxAttempts {
+	if _, err := e.Resume(context.Background()); !errors.Is(err, run.ErrNothingToResume) || r.objects["teams/T1"] != run.MaxAttempts {
 		t.Errorf("a resume after the run ended: %v, %d calls", err, r.objects["teams/T1"])
 	}
 }
@@ -566,7 +566,7 @@ func TestACrashWhileResumingMakesEachObjectOnce(t *testing.T) {
 						w.wait(run.ResendAfter)
 						e = w.engine(e.Steps...)
 						e.CrashAt(func(at run.CrashPoint, k string) bool { return at == q && k == second })
-						res, err := e.Resume(context.Background(), "")
+						res, err := e.Resume(context.Background())
 						if errors.Is(err, run.ErrCrashed) {
 							w.reopen()
 							w.wait(run.ResendAfter)
@@ -694,12 +694,12 @@ func TestResumeReconcilesASuccessfulCreateWithoutResending(t *testing.T) {
 				once(t, r, key)
 			}
 			teams.found[key] = run.Lookup{Outcome: run.LookupFound, JSM: pdRef("jsm-team")}
-			skip := ""
+			var skip []string
 			if tc.crash {
 				// A matching object wins even if the operator requested a skip.
-				skip = key
+				skip = []string{key}
 			}
-			res, err = e.Resume(ctx, skip)
+			res, err = e.Resume(ctx, skip...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -732,14 +732,14 @@ func TestResumeCanSkipAConfirmedAbsentCreateAfterCrashingBeforeSend(t *testing.T
 		t.Fatalf("skipping before the create had time to appear: %v", err)
 	}
 	w.wait(run.ResendAfter)
-	if _, err := e.Resume(ctx, second); messagesExit(err) != messages.ExitValidationFailed {
-		t.Fatalf("skipping a later item: %v", err)
+	if _, err := e.Resume(ctx, first, second); messagesExit(err) != messages.ExitValidationFailed || len(r.objects) != 0 {
+		t.Fatalf("batch with an unjournaled item: writes %v, err %v", r.objects, err)
 	}
-	if res, err := e.Resume(ctx, first); err != nil || res.Info.State != review.Interrupted || len(r.objects) != 0 {
+	if res, err := e.Resume(ctx, first); err != nil || res.Info.State != review.Interrupted || r.objects[first] != 0 || r.objects[second] != 1 {
 		t.Fatalf("skipping without a lookup miss: run %s, writes %v, err %v", res.Info.State, r.objects, err)
 	}
 	teams.found[first] = run.Lookup{Outcome: run.LookupNotFound}
-	if res := w.resume(e); res.Info.State != review.Interrupted || len(r.objects) != 0 {
+	if res := w.resume(e); res.Info.State != review.Interrupted || r.objects[first] != 0 || r.objects[second] != 1 {
 		t.Fatalf("resume without operator skip: run %s, writes %v", res.Info.State, r.objects)
 	}
 	res, err := e.Resume(ctx, first)
@@ -754,6 +754,73 @@ func TestResumeCanSkipAConfirmedAbsentCreateAfterCrashingBeforeSend(t *testing.T
 	e = w.engine(teams)
 	if next := w.plan(e).Version; next.Calls != 1 || next.Plan.Items[0].Key != first || next.Plan.Items[0].Action != review.Create {
 		t.Fatalf("next plan should offer only the skipped create: %+v", next.Plan.Items)
+	}
+}
+
+func TestUnresolvedCreateDefersOnlyItsDependents(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("settled intermediate=%t", legacy), func(t *testing.T) {
+			ctx := context.Background()
+			w := newWorkspace(t)
+			r := &remote{objects: map[string]int{}}
+			teams := newStep("teams", r)
+			const parent, child, grandchild, independent = "teams/T1", "teams/T2", "teams/T3", "teams/T4"
+			basePlan := teamsPlan("T1", "T2", "T3", "T4")
+			teams.plan = func(in run.PlanInput) (run.Planned, error) {
+				p, err := basePlan(in)
+				p.Items[1].DependsOn = []string{parent}
+				p.Items[2].DependsOn = []string{child}
+				if legacy {
+					p.Items[1].Action = review.Map
+					p.Items[1].JSM = pdRef("jsm-existing")
+				}
+				return p, err
+			}
+			e := w.engine(teams)
+			v := w.plan(e).Version
+			// The create reached JSM, but the process died before recording its response.
+			e.CrashAt(func(at run.CrashPoint, key string) bool { return at == run.CrashPoints[2] && key == parent })
+			started, err := e.Apply(ctx, v, confirmation(v))
+			if !errors.Is(err, run.ErrCrashed) {
+				t.Fatalf("apply: %v", err)
+			}
+			once(t, r, parent)
+			wantChild := review.Pending
+			wantCalls := []string{parent, independent, child, grandchild}
+			if legacy {
+				// The previous executor could finish a map while its dependency
+				// was unresolved, then pause before the next call.
+				ts := now.Format(time.RFC3339Nano)
+				if _, err := w.st.DB().ExecContext(ctx, `INSERT INTO journal
+					(run_id, seq, item_key, attempt, state, started_at, finished_at, jsm_type, jsm_id)
+					VALUES (?, 2, ?, 0, 'done', ?, ?, 'team', 'jsm-existing')`,
+					started.Info.ID, child, ts, ts); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := w.st.DB().ExecContext(ctx, `UPDATE runs SET written = 1 WHERE id = ?`, started.Info.ID); err != nil {
+					t.Fatal(err)
+				}
+				wantChild = review.Done
+				wantCalls = []string{parent, independent, grandchild}
+			}
+			teams.found[parent] = run.Lookup{Outcome: run.LookupNotFound}
+			w.reopen()
+			w.wait(run.ResendAfter)
+			e = w.engine(teams)
+			res := w.resume(e)
+			want := map[string]review.EntryState{parent: review.Unknown, child: wantChild, grandchild: review.Pending, independent: review.Done}
+			if res.Info.State != review.Interrupted || !maps(states(res.Record), want) || len(r.objects) != 2 {
+				t.Fatalf("resume after lookup miss: run %s, states %v, writes %v", res.Info.State, states(res.Record), r.objects)
+			}
+			once(t, r, parent, independent)
+			teams.found[parent] = run.Lookup{Outcome: run.LookupFound, JSM: pdRef("jsm-recovered-team")}
+			w.reopen()
+			allDone(t, w.resume(w.engine(teams)))
+			once(t, r, wantCalls...)
+			if !slices.Equal(teams.applied, wantCalls) {
+				t.Errorf("calls %v, want %v in dependency order", teams.applied, wantCalls)
+			}
+		})
 	}
 }
 
@@ -807,7 +874,7 @@ func TestResumeUsesTheRunsSnapshotFormat(t *testing.T) {
 	if _, err := other.Read(ctx, review.JSM); err != nil {
 		t.Fatal(err)
 	}
-	if res, err := other.Resume(ctx, ""); messagesExit(err) != messages.ExitValidationFailed || res.Info.State != review.Paused {
+	if res, err := other.Resume(ctx); messagesExit(err) != messages.ExitValidationFailed || res.Info.State != review.Paused {
 		t.Errorf("resume with newer format: run %s, error %v", res.Info.State, err)
 	}
 	if len(r.objects) != 0 || len(teams.looked) != 0 {
@@ -878,14 +945,14 @@ func TestResumeRefusesWhatItCannotRun(t *testing.T) {
 	if err := os.WriteFile(path, append(data, ' '), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Resume(ctx, ""); messagesExit(err) != messages.ExitValidationFailed {
+	if _, err := e.Resume(ctx); messagesExit(err) != messages.ExitValidationFailed {
 		t.Errorf("an edited plan.json: %v", err)
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	other := w.engine(newStep("users", &remote{objects: map[string]int{}}))
-	if _, err := other.Resume(ctx, ""); !errors.Is(err, run.ErrUnknownStep) {
+	if _, err := other.Resume(ctx); !errors.Is(err, run.ErrUnknownStep) {
 		t.Errorf("a plan whose step this build lacks: %v", err)
 	}
 	accounts := e.Accounts
@@ -893,7 +960,7 @@ func TestResumeRefusesWhatItCannotRun(t *testing.T) {
 		review.PagerDuty: accounts[review.PagerDuty],
 		review.JSM:       {ID: "cloud-2", OrgID: accounts[review.JSM].OrgID},
 	}
-	if _, err := e.Resume(ctx, ""); messagesExit(err) != messages.ExitValidationFailed {
+	if _, err := e.Resume(ctx); messagesExit(err) != messages.ExitValidationFailed {
 		t.Errorf("another JSM site: %v", err)
 	}
 	e.Accounts = accounts

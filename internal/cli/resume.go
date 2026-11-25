@@ -34,7 +34,7 @@ func runResume(ctx context.Context, env *Env, f ResumeFlags) (err error) {
 		return err
 	}
 	if status.Run == nil || status.Run.State == review.Completed {
-		if f.SkipCreate != "" {
+		if len(f.SkipCreates) != 0 {
 			return messages.ValidationFailed(engine.ErrNothingToResume)
 		}
 		env.summarize([]string{"Nothing to resume: no run is unfinished"})
@@ -116,7 +116,7 @@ func runResume(ctx context.Context, env *Env, f ResumeFlags) (err error) {
 	}
 
 	view := startRunView(env, e)
-	res, err := e.Resume(ctx, f.SkipCreate)
+	res, err := e.Resume(ctx, f.SkipCreates...)
 	view.close()
 	return finishRun(env, "resume", out, res, err)
 }

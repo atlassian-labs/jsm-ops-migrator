@@ -124,8 +124,8 @@ type executor struct {
 	// latest is each item's latest row from before this command, for a run
 	// that is resumed.
 	latest map[string]journalRow
-	// skipCreate is an operator-confirmed omission for one journaled item.
-	skipCreate string
+	// skipCreates are operator-confirmed omissions for journaled items.
+	skipCreates map[string]bool
 	// taken and total count each step's items: taken those with a final
 	// state.
 	taken, total map[string]int
@@ -149,8 +149,8 @@ func newExecutor(e *Engine, info *RunInfo, p review.Plan, jsm *discover.Snapshot
 // run and writes its record. An item whose call is sending or unknown, which
 // only a resumed run has, is looked up first. Before each item it checks
 // whether the operator asked the run to stop, and if so stops there, paused.
-// It stops interrupted at a call cut short by ctx, or when a lookup miss
-// leaves the item waiting for reconciliation.
+// An unresolved result defers its dependents. Other items can proceed in
+// plan order. Cancellation and a too-recent update lookup miss stop the pass.
 //
 // The bookkeeping after a call uses a context that ctx ending does not
 // cancel: a call that was answered is recorded whatever happens to the
@@ -161,7 +161,8 @@ func (x *executor) run(ctx context.Context) (review.Run, error) {
 	sinceRecord := 0
 	for _, it := range x.plan.Items {
 		row, seen := x.latest[it.Key]
-		if seen && settled(row.state) {
+		waiting := x.waitingForDependency(it)
+		if seen && settled(row.state) && !waiting {
 			x.results[it.Key] = Result{State: row.state, JSM: doneObject(row)}
 			continue
 		}
@@ -172,6 +173,12 @@ func (x *executor) run(ctx context.Context) (review.Run, error) {
 		if x.stopRequested() {
 			state = review.Paused
 			break
+		}
+		if waiting {
+			// Older journals may already have a result for this item.
+			// Keep that row and carry the unresolved dependency forward.
+			x.results[it.Key] = Result{State: review.Pending}
+			continue
 		}
 		var res Result
 		var stop bool
@@ -200,7 +207,7 @@ func (x *executor) run(ctx context.Context) (review.Run, error) {
 	switch {
 	case state != review.Running:
 		final.State = state
-	case x.unsettled() > 0:
+	case x.hasUnsettled():
 		// A call whose outcome is unknown may have made its object. Until
 		// resume looks it up, the run is unfinished, so no new plan or run
 		// plans the object again and sends a second create.
@@ -260,16 +267,13 @@ func (x *executor) stopRequested() bool {
 	return req.RunID == x.info.ID
 }
 
-// unsettled counts the items whose call may have taken effect without the
-// run knowing what it made.
-func (x *executor) unsettled() int {
-	n := 0
+func (x *executor) hasUnsettled() bool {
 	for _, r := range x.results {
-		if r.State == review.Unknown {
-			n++
+		if !settled(r.State) {
+			return true
 		}
 	}
-	return n
+	return false
 }
 
 func (x *executor) writeRecord(ctx context.Context, info RunInfo) (review.Run, error) {
@@ -289,6 +293,17 @@ func (x *executor) deps(it review.Item) Results {
 		deps[d] = x.results[d]
 	}
 	return deps
+}
+
+// A step decides how to handle a dependency that failed or was declined.
+// An unresolved dependency may still succeed, so leave the dependent pending.
+func (x *executor) waitingForDependency(it review.Item) bool {
+	for _, key := range it.DependsOn {
+		if !settled(x.results[key].State) {
+			return true
+		}
+	}
+	return false
 }
 
 // crashPoint is a point in an item's turn where a crash leaves a different
@@ -456,10 +471,8 @@ func (x *executor) send(ctx context.Context, row journalRow, it review.Item, pre
 // The age is measured from the attempt's started_at, which is written before
 // the call and never changed, and the count is the journal's attempt number,
 // which rises with each attempt in the transaction that writes it, so no
-// number of resumes gets a call sent sooner or more often. A not found that
-// comes too soon stops the run there: it is settled by the next resume once
-// the attempt is old enough, and the items that depend on it wait for that
-// resume instead of being declined in this one.
+// number of resumes gets an update sent sooner or more often. A lookup
+// miss before an update is old enough stops the pass.
 func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRow) (Result, bool, error) {
 	deps := x.deps(it)
 	found, err := x.e.step(it.Step()).Lookup(ctx, it, deps, x.jsm)
@@ -471,7 +484,7 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 	foundObject := err == nil && found.Outcome == LookupFound
 	acknowledged := it.Action == review.Create && (foundObject || row.createAcknowledged())
 	canSkip := it.Action == review.Create && row.canSkipCreate()
-	skipRequested := it.Action == review.Create && x.skipCreate == it.Key
+	skipRequested := canSkip && x.skipCreates[it.Key]
 	believed := row.started.Add(resendAfter)
 	if it.Action == review.Update && notFound && !now.Before(believed) && row.attempt < maxAttempts {
 		return x.take(ctx, db, it, &row)
@@ -489,7 +502,7 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "create_skipped",
 			Text: "The operator verified no object was made in JSM and skipped this create. A new plan can account for the skipped item."}}
 	case notFound && it.Action == review.Create:
-		row.state, row.jsm, stop = review.Unknown, nil, true
+		row.state, row.jsm = review.Unknown, nil
 		text := "The lookup did not find the JSM object. The create may have succeeded, so resume will only look it up. Check JSM using the recorded request ID if available, then resume again."
 		if canSkip {
 			text += fmt.Sprintf(" If you verify that no object was made, pass item key %s to 'jsm-ops-migrator resume --skip-create' after %s.",
@@ -516,7 +529,6 @@ func (x *executor) settle(ctx, db context.Context, it review.Item, row journalRo
 			text += fmt.Sprintf(" The lookup failed: %v.", err)
 		}
 		if skipRequested {
-			stop = true
 			text += " Skipping requires a lookup that finds no matching object."
 		}
 		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "outcome_unknown", Text: text}}

@@ -237,6 +237,54 @@ func TestResumeSkipCreateFlagLeavesTheWriteForANewPlan(t *testing.T) {
 	}
 }
 
+func TestResumeBatchesSkipCreateWithOnePreflight(t *testing.T) {
+	for _, firstMisses := range []bool{true, false} {
+		t.Run(fmt.Sprintf("first lookup misses=%t", firstMisses), func(t *testing.T) {
+			s, step := planned(t)
+			const first, second = "teams/PT1", "teams/PT2"
+			step.fail[first] = httperr.ErrUnknownOutcome
+			step.fail[second] = httperr.ErrUnknownOutcome
+			if r := s.run("apply", "--jsm-plan", "premium", "--accept-file", s.acceptanceFile("known")); r.code != messages.ExitPartial {
+				t.Fatalf("apply: exit %d, stderr %s", r.code, r.stderr)
+			}
+			if firstMisses {
+				step.found[first] = engine.Lookup{Outcome: engine.LookupNotFound}
+			}
+			step.found[second] = engine.Lookup{Outcome: engine.LookupNotFound}
+			s.wait(time.Hour)
+			if r := s.run("resume", "--jsm-plan", "premium", "--skip-create", first, "--skip-create", "teams/missing"); r.code != messages.ExitValidationFailed {
+				t.Fatalf("resume with an unknown key: exit %d, stderr %s", r.code, r.stderr)
+			}
+			before := len(s.apis.Calls())
+			// Journal order governs execution even when flags are supplied in reverse.
+			r := s.run("resume", "--jsm-plan", "premium", "--skip-create", second, "--skip-create", first)
+			wantSkips := 2
+			if !firstMisses {
+				wantSkips = 1
+			}
+			if r.code != messages.ExitPartial || strings.Count(r.stdout, "create_skipped") != wantSkips {
+				t.Fatalf("resume: exit %d, stderr %s\n%s", r.code, r.stderr, r.stdout)
+			}
+			if checks := strings.Count(strings.Join(s.apis.Calls()[before:], "\n"), "ops teams "); checks != 1 {
+				t.Errorf("%d JSM access checks, want one preflight for the batch", checks)
+			}
+			if !firstMisses {
+				step.found[first] = engine.Lookup{Outcome: engine.LookupFound, JSM: &review.Ref{Type: "team", ID: "jsm-recovered"}}
+				if r := s.run("resume", "--jsm-plan", "premium"); r.code != messages.ExitPartial || !strings.Contains(r.stdout, "create_skipped") {
+					t.Fatalf("resume after the earlier create reconciles: exit %d, stderr %s\n%s", r.code, r.stderr, r.stdout)
+				}
+			}
+			if strings.Join(step.calls, " ") != first+" "+second {
+				t.Errorf("resume resent a create: %v", step.calls)
+			}
+			want := fmt.Sprintf("Plan v2: %d call", wantSkips)
+			if r := s.run("plan", "--jsm-plan", "premium"); r.code != ExitOK || !strings.Contains(r.stdout, want) {
+				t.Errorf("replan: exit %d, stderr %s\n%s", r.code, r.stderr, r.stdout)
+			}
+		})
+	}
+}
+
 // The confirmation names the account whose API token makes the run's calls,
 // so resume needs that account's token.
 func TestResumeNeedsTheAccountThatConfirmed(t *testing.T) {
