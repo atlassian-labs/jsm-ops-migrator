@@ -27,7 +27,7 @@ const (
 )
 
 // PlanFiles are the review files WritePlanVersion writes for each version.
-var PlanFiles = []string{PlanFile, PlanMarkdownFile, DiffFile, RiskQueueFile, AcceptanceTemplateFile}
+var PlanFiles = []string{PlanFile, PlanMarkdownFile, DiffFile, RiskQueueFile, AcceptanceTemplateFile, MappingFile}
 
 // PlanDir is a plan version's folder, relative to artifacts/.
 func PlanDir(version int) string { return filepath.Join("plans", fmt.Sprintf("v%d", version)) }
@@ -52,11 +52,16 @@ func WritePlanVersion(ws *store.Workspace, p Plan, prev *Plan) (string, error) {
 	if err := removeUncommitted(ws); err != nil {
 		return "", fmt.Errorf("writing plan v%d: %w", p.Version, err)
 	}
+	mapping, err := proposedMappings(p)
+	if err != nil {
+		return "", err
+	}
 	files := []struct {
 		name string
 		data []byte
 	}{
 		{PlanFile, data},
+		{MappingFile, mapping},
 		{PlanMarkdownFile, RenderPlan(p)},
 		{DiffFile, RenderDiff(Compare(prev, p))},
 		{RiskQueueFile, RenderRiskQueue(p)},

@@ -14,7 +14,7 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/cli"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx"
-	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
+
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit/jsmfake"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit/pdfake"
@@ -43,11 +43,12 @@ func TestMain(m *testing.M) {
 		if path := os.Getenv(keychainEnv); path != "" {
 			kc = testkit.NewFileKeychain(path)
 		}
-		newClients := func(*cli.Env, credentials.Set) (preflight.Clients, error) { return preflight.Placeholders(), nil }
+		var base *httpx.Config
 		if os.Getenv(fakeAPIsEnv) == "healthy" {
-			newClients = healthyAPIs()
+			cfg := healthyAPIs()
+			base = &cfg
 		}
-		os.Exit(run(kc, newClients))
+		os.Exit(run(kc, base))
 	}})
 }
 
@@ -56,9 +57,27 @@ func TestMain(m *testing.M) {
 // that accept the credentials the scripts use. The site acme.atlassian.net
 // has cloudId cloud-1, and the org API key manages org-1, which has
 // operator@example.com.
-func healthyAPIs() clientsFactory {
+func healthyAPIs() httpx.Config {
 	account := pdfake.New(stderrT{}, "pd-canary-0123456789", pdfake.InRegion(httpx.Region(os.Getenv(pagerDutyRegionEnv))))
-	account.Answer("/users", map[string]any{"users": []map[string]string{{"html_url": "https://acme.pagerduty.com/users/P1"}}})
+	var people []any
+	for _, u := range []struct {
+		id, email, role string
+		pending         bool
+	}{
+		{"P1", "operator@example.com", "admin", false},
+		{"P2", "missing@example.com", "user", false},
+		{"P3", "pending@example.com", "user", true},
+		{"P4", "stakeholder@example.com", "read_only_limited_user", false},
+		{"P5", "inactive@example.com", "user", false},
+		{"P6", "ambiguous@example.com", "user", false},
+		{"P7", "other-site@example.com", "user", false},
+	} {
+		if os.Getenv("JSM_OPS_MIGRATOR_TEST_CHANGED_EMAIL") == "1" && u.id == "P1" {
+			u.email = "changed@example.com"
+		}
+		people = append(people, map[string]any{"id": u.id, "email": u.email, "role": u.role, "invitation_sent": u.pending, "html_url": "https://acme.pagerduty.com/users/" + u.id})
+	}
+	account.List("/users", "users", people)
 	account.Answer("/abilities", map[string]any{"abilities": []string{"teams"}})
 
 	site := jsmfake.New(stderrT{}, jsmfake.Account{
@@ -69,11 +88,24 @@ func healthyAPIs() clientsFactory {
 	site.List(http.MethodGet, site.AdminPath("/v1/orgs"), "data",
 		[]any{map[string]any{"id": "org-1", "type": "orgs", "attributes": map[string]any{"name": "Acme"}}})
 	site.Answer(http.MethodPost, site.AdminPath("/v2/orgs/org-1/directories/-/users/search"), http.StatusOK,
-		map[string]any{"data": []any{map[string]any{"accountId": "account-of-org-1", "email": "operator@example.com"}}})
+		map[string]any{"data": []any{
+			map[string]any{"accountId": "account-of-org-1", "email": "Operator@example.com", "accountStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-1"}}},
+			map[string]any{"accountId": "inactive", "email": "inactive@example.com", "accountStatus": "inactive"},
+			map[string]any{"accountId": "amb1", "email": "ambiguous@example.com", "accountStatus": "active"},
+			map[string]any{"accountId": "amb2", "email": "ambiguous@example.com", "accountStatus": "active"},
+			map[string]any{"accountId": "other-site", "email": "other-site@example.com", "accountStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-2"}}},
+		}})
+
+	if os.Getenv("JSM_OPS_MIGRATOR_TEST_DIRECTORY_DENIED") == "1" {
+		// Preflight can find the operator, but the migration lookup fails.
+		site.Fail(http.MethodPost, site.AdminPath("/v2/orgs/org-1/directories/-/users/search"),
+			jsmfake.Fault{Status: 200, Body: map[string]any{"data": []any{map[string]string{"accountId": "account-of-org-1", "email": "operator@example.com"}}}},
+			jsmfake.Fault{Status: http.StatusForbidden})
+	}
 
 	base := account.Config("")
 	base.Transport = byHost{pagerDuty: account.Transport(), atlassian: site.Transport()}
-	return apiClients(base)
+	return base
 }
 
 // byHost sends each request to the fake that serves its host, because one

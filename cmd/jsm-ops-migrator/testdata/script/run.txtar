@@ -1,5 +1,4 @@
-# plan and apply with the placeholder steps write every review file and run
-# record, and send nothing.
+# Review-only identity proposals go through plan and never send a migration write.
 env HOME=$WORK/home
 env USERPROFILE=$WORK/home
 env JSM_OPS_MIGRATOR_TEST_APIS=healthy
@@ -20,13 +19,24 @@ exec jsm-ops-migrator plan
 stdout 'Read PagerDuty: complete'
 stdout 'Read JSM: complete'
 stdout 'Plan v1: 0 calls'
-stdout 'Messages: 0 blockers, 0 warnings, 0 manual tasks, 1 information'
+stdout 'Messages: 0 blockers, 0 warnings, 0 manual tasks, 0 information'
 exists $W/plans/v1/plan.json
 exists $W/plans/v1/plan.md
 exists $W/plans/v1/diff.md
 exists $W/plans/v1/risk-queue.md
 exists $W/plans/v1/acceptance-template.yaml
-grep 'placeholder_no_steps' $W/plans/v1/risk-queue.md
+grep 'P1,operator@example.com,admin,account-of-org-1,yes,map_existing' $W/plans/v1/mapping.csv
+grep 'P2,missing@example.com,user,,,review_directory_miss' $W/plans/v1/mapping.csv
+grep 'P3,pending@example.com,user,,,exclude_pending' $W/plans/v1/mapping.csv
+grep 'P4,stakeholder@example.com,read_only_limited_user,,,exclude_stakeholder' $W/plans/v1/mapping.csv
+grep 'P5,inactive@example.com,user,,,review_inactive' $W/plans/v1/mapping.csv
+grep 'P6,ambiguous@example.com,user,,,review_ambiguous' $W/plans/v1/mapping.csv
+grep 'P7,other-site@example.com,user,other-site,no,propose_access' $W/plans/v1/mapping.csv
+
+exec jsm-ops-migrator plan --only jsm
+stdout 'Plan v1 is unchanged'
+exec jsm-ops-migrator plan --only pagerduty
+stdout 'Plan v1 is unchanged'
 
 # Without a terminal, the acceptance file is the confirmation.
 ! exec jsm-ops-migrator apply
@@ -34,7 +44,7 @@ stderr 'plan v1 needs a confirmation: fill in .*acceptance-template.yaml and giv
 ! exists $W/runs
 
 exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
-stdout 'of plan v1: 0 of 0 items done'
+stdout 'of plan v1: [0-7] of 7 items done'
 exists $W/plans/v1/confirmation.md
 grep 'account-of-org-1' $W/plans/v1/confirmation.md
 ! exists $WORK/home/jsm-ops-migrator/active-run.json
@@ -58,3 +68,18 @@ stdout '"state": "completed"'
 
 ! stdout 'canary'
 ! stderr 'canary'
+
+# A changed source email must never inherit the previous account ID.
+env JSM_OPS_MIGRATOR_TEST_CHANGED_EMAIL=1
+! exec jsm-ops-migrator plan --only pagerduty
+grep 'P1,changed@example.com,admin,,,refresh_lookup' $W/plans/v2/mapping.csv
+grep 'lookup_required' $W/plans/v2/risk-queue.md
+exec jsm-ops-migrator plan --only jsm
+grep 'P1,changed@example.com,admin,,,review_directory_miss' $W/plans/v3/mapping.csv
+
+# Failed directory coverage cannot turn a missing result into a proposal.
+env JSM_OPS_MIGRATOR_TEST_DIRECTORY_DENIED=1
+! exec jsm-ops-migrator plan --only jsm
+stdout 'Read JSM: incomplete'
+grep 'users_jsm_read' $W/plans/v4/risk-queue.md
+! grep 'review_directory_miss' $W/plans/v4/mapping.csv

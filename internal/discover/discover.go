@@ -65,10 +65,13 @@ type objectKey struct{ kind, id string }
 // Writer collects what one step reads from one side. Nothing is saved until
 // the step's Read returns.
 type Writer struct {
-	step    string
-	objects []object
-	seen    map[objectKey]bool
-	refused error
+	// PagerDuty is the source snapshot available for a JSM read that needs
+	// source identifiers, such as exact email searches.
+	PagerDuty *Snapshot
+	step      string
+	objects   []object
+	seen      map[objectKey]bool
+	refused   error
 }
 
 type object struct {
@@ -268,8 +271,16 @@ func Read(ctx context.Context, st *store.Store, side review.Side, account review
 	if _, err = st.DB().ExecContext(ctx, `UPDATE snapshot_reads SET account = ? WHERE id = ?`, sealedAccount, s.id); err != nil {
 		return nil, err
 	}
+	var source *Snapshot
+	if side == review.JSM {
+		source, err = Latest(ctx, st, review.PagerDuty, readers)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, r := range readers {
 		w := newWriter(r.Name())
+		w.PagerDuty = source
 		readErr := r.Read(ctx, side, w)
 		if err := ctx.Err(); err != nil {
 			return nil, err

@@ -78,6 +78,8 @@ type Item struct {
 	// because apply sends what it says, so a payload that holds a secret or
 	// contact data is refused instead.
 	Payload json.RawMessage `json:"payload,omitempty"`
+	// UserMapping is a proposal for the admin, independent of executed mappings.
+	UserMapping *UserMapping `json:"user_mapping,omitempty"`
 }
 
 // Step is the name of the step that planned the item.
@@ -259,6 +261,18 @@ func (it Item) check(i int, before map[string]bool) []error {
 		slices.Sort(rules)
 		// The rules only, never the value, so the error cannot leak it.
 		bad("its key, a dependency or a reference holds sensitive data (%s)", strings.Join(slices.Compact(rules), ", "))
+	}
+	if it.UserMapping != nil {
+		if it.PagerDuty == nil || it.PagerDuty.Type != "user" {
+			bad("identity proposal needs a PagerDuty user")
+		}
+		data, err := json.Marshal(it.UserMapping)
+		if err == nil {
+			err = ScreenPayload(data)
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if len(it.Payload) > 0 {
 		if err := ScreenPayload(it.Payload); err != nil {

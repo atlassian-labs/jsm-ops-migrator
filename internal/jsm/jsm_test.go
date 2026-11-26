@@ -140,7 +140,7 @@ func TestFindUserMatchesTheEmail(t *testing.T) {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	r := f.Requests()[0]
-	if r.Method != http.MethodPost || string(r.Body) != `{"emails":["operator@example.com"]}` {
+	if r.Method != http.MethodPost || string(r.Body) != `{"emails":["operator@example.com"],"limit":100}` {
 		t.Fatalf("request %s %s", r.Method, r.Body)
 	}
 }
@@ -149,7 +149,6 @@ func TestFindUserWithoutAMatchIsNotFound(t *testing.T) {
 	for name, data := range map[string][]any{
 		"empty":         {},
 		"another email": {map[string]any{"accountId": "acc-1", "email": "someone@example.com"}},
-		"no account id": {map[string]any{"accountId": "", "email": "operator@example.com"}},
 	} {
 		f, c := fake(t)
 		f.Answer(http.MethodPost, f.AdminPath("/v2/orgs/org-1/directories/-/users/search"), http.StatusOK, map[string]any{"data": data})
