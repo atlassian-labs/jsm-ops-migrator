@@ -39,6 +39,8 @@ type Atlassian interface {
 	// CheckAccess makes a read-only JSM Operations call (GET /v1/teams) to
 	// prove that the email and API token work on the site.
 	CheckAccess(ctx context.Context, cloudID string) error
+	// CurrentAccountID identifies the authenticated Jira user for a named approval.
+	CurrentAccountID(ctx context.Context, cloudID string) (string, error)
 	// HasAPI reports whether the site has one of the public APIs that are
 	// still being built.
 	HasAPI(ctx context.Context, cloudID string, api API) (bool, error)
@@ -70,7 +72,8 @@ type Org struct {
 
 // Account is the operator's Atlassian account.
 type Account struct {
-	AccountID string `json:"account_id"`
+	AccountID      string `json:"account_id"`
+	ActiveOrgAdmin bool   `json:"active_org_admin,omitempty"`
 }
 
 // API names one of the public JSM APIs that are still being built. The
@@ -106,12 +109,13 @@ type notBuilt struct{}
 func (notBuilt) Error() string        { return "the API clients are not built yet" }
 func (notBuilt) Is(target error) bool { return target == httperr.ErrUnavailable }
 
-func (p placeholder) AccountHost(context.Context) (string, error)        { return "", p.err() }
-func (p placeholder) Abilities(context.Context) ([]string, error)        { return nil, p.err() }
-func (p placeholder) TenantInfo(context.Context, string) (Tenant, error) { return Tenant{}, p.err() }
-func (p placeholder) CheckAccess(context.Context, string) error          { return p.err() }
-func (p placeholder) HasAPI(context.Context, string, API) (bool, error)  { return false, p.err() }
-func (p placeholder) Orgs(context.Context) ([]Org, error)                { return nil, p.err() }
+func (p placeholder) CurrentAccountID(context.Context, string) (string, error) { return "", p.err() }
+func (p placeholder) AccountHost(context.Context) (string, error)              { return "", p.err() }
+func (p placeholder) Abilities(context.Context) ([]string, error)              { return nil, p.err() }
+func (p placeholder) TenantInfo(context.Context, string) (Tenant, error)       { return Tenant{}, p.err() }
+func (p placeholder) CheckAccess(context.Context, string) error                { return p.err() }
+func (p placeholder) HasAPI(context.Context, string, API) (bool, error)        { return false, p.err() }
+func (p placeholder) Orgs(context.Context) ([]Org, error)                      { return nil, p.err() }
 func (p placeholder) FindUser(context.Context, string, credentials.Sensitive) (Account, error) {
 	return Account{}, p.err()
 }

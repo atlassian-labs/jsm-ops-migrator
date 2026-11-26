@@ -102,6 +102,9 @@ func (e *Engine) CheckPlanSteps(ctx context.Context, v *PlanVersion) error {
 }
 
 func (e *Engine) checkedPlanRead(ctx context.Context, v *PlanVersion) (*discover.Snapshot, error) {
+	if err := e.checkMappingApproval(ctx, v); err != nil {
+		return nil, err
+	}
 	if err := e.checkSteps(); err != nil {
 		return nil, err
 	}

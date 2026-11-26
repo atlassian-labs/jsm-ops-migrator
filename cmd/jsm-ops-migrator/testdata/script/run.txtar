@@ -38,6 +38,34 @@ stdout 'Plan v1 is unchanged'
 exec jsm-ops-migrator plan --only pagerduty
 stdout 'Plan v1 is unchanged'
 
+# Approval binds the reviewed CSV to this version and the authenticated administrator.
+! exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
+stderr 'needs reviewed user mappings'
+cp $W/plans/v1/mapping.csv reviewed.csv
+replace-text reviewed.csv ',accept' ',defer'
+cp reviewed.csv altered.csv
+replace-text altered.csv 'account-of-org-1' 'other-account'
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv altered.csv
+stderr 'only review_decision may be edited'
+env JSM_OPS_MIGRATOR_TEST_NON_ADMIN=1
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stderr 'requires an active account with the organization admin role'
+env JSM_OPS_MIGRATOR_TEST_NON_ADMIN=
+env JSM_OPS_MIGRATOR_TEST_OTHER_CALLER=1
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stderr 'authenticated account differs'
+env JSM_OPS_MIGRATOR_TEST_OTHER_CALLER=
+! exists $W/plans/v1/mapping-approval.json
+exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stdout 'Recorded 7 mapping decisions for plan v1'
+grep '"approved_by": "account-of-org-1"' $W/plans/v1/mapping-approval.json
+grep '"review_decision": "defer"' $W/plans/v1/mapping-approval.json
+! grep '"review_decision": "accept"' $W/plans/v1/mapping-approval.json
+cp $W/plans/v1/mapping-approval.json first.json
+exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+cmp first.json $W/plans/v1/mapping-approval.json
+! exists $W/runs
+
 # Without a terminal, the acceptance file is the confirmation.
 ! exec jsm-ops-migrator apply --pagerduty-region EU
 stderr 'plan v1 needs a confirmation: fill in .*acceptance-template.yaml and give it with --accept-file'
@@ -76,6 +104,12 @@ grep 'P1,changed@example.com,admin,,,refresh_lookup' $W/plans/v2/mapping.csv
 grep 'lookup_required' $W/plans/v2/risk-queue.md
 exec jsm-ops-migrator plan --only jsm
 grep 'P1,changed@example.com,admin,,,review_directory_miss' $W/plans/v3/mapping.csv
+
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stderr 'not the latest'
+! exec jsm-ops-migrator plan approve-mappings --version 3 --csv reviewed.csv
+stderr 'differs from plan v3'
+! exists $W/plans/v3/mapping-approval.json
 
 # Failed directory coverage cannot turn a missing result into a proposal.
 env JSM_OPS_MIGRATOR_TEST_DIRECTORY_DENIED=1

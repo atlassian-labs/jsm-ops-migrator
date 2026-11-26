@@ -85,11 +85,20 @@ func healthyAPIs() httpx.Config {
 		Email: "operator@example.com", Token: "atl-canary-0123456789", OrgKey: "org-canary-0123456789",
 	})
 	site.Answer(http.MethodGet, site.OpsPath("/v1/teams"), http.StatusOK, []any{})
+	roles := []string{"atlassian/org-admin"}
+	if os.Getenv("JSM_OPS_MIGRATOR_TEST_NON_ADMIN") == "1" {
+		roles = nil
+	}
+	caller := "account-of-org-1"
+	if os.Getenv("JSM_OPS_MIGRATOR_TEST_OTHER_CALLER") == "1" {
+		caller = "different-account"
+	}
+	site.Answer(http.MethodGet, "/ex/jira/cloud-1"+site.JiraPath("/myself"), http.StatusOK, map[string]string{"accountId": caller})
 	site.List(http.MethodGet, site.AdminPath("/v1/orgs"), "data",
 		[]any{map[string]any{"id": "org-1", "type": "orgs", "attributes": map[string]any{"name": "Acme"}}})
 	site.Answer(http.MethodPost, site.AdminPath("/v2/orgs/org-1/directories/-/users/search"), http.StatusOK,
 		map[string]any{"data": []any{
-			map[string]any{"accountId": "account-of-org-1", "email": "Operator@example.com", "accountStatus": "active", "membershipStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-1"}}},
+			map[string]any{"accountId": "account-of-org-1", "email": "Operator@example.com", "accountStatus": "active", "membershipStatus": "active", "platformRoles": roles, "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-1"}}},
 			map[string]any{"accountId": "inactive", "email": "inactive@example.com", "accountStatus": "inactive"},
 			map[string]any{"accountId": "amb1", "email": "ambiguous@example.com", "accountStatus": "active", "membershipStatus": "active"},
 			map[string]any{"accountId": "amb2", "email": "ambiguous@example.com", "accountStatus": "active", "membershipStatus": "active"},
@@ -171,6 +180,18 @@ func (stderrT) Errorf(format string, args ...any) {
 func TestScripts(t *testing.T) {
 	testscript.Run(t, testscript.Params{
 		Dir: "testdata/script",
+		Cmds: map[string]func(*testscript.TestScript, bool, []string){
+			"replace-text": func(ts *testscript.TestScript, neg bool, args []string) {
+				if neg || len(args) != 3 {
+					ts.Fatalf("usage: replace-text file old new")
+				}
+				data := ts.ReadFile(args[0])
+				if !strings.Contains(data, args[1]) {
+					ts.Fatalf("text to replace was missing")
+				}
+				ts.Check(os.WriteFile(ts.MkAbs(args[0]), []byte(strings.ReplaceAll(data, args[1], args[2])), 0600))
+			},
+		},
 		Setup: func(e *testscript.Env) error {
 			e.Setenv(keychainEnv, filepath.Join(e.WorkDir, "keychain.json"))
 			return nil

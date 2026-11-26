@@ -24,6 +24,8 @@ const (
 	// start with /jsm/ops/api/<cloudId>), called with the Atlassian account
 	// email and API token.
 	JSMOps Family = "jsm_ops"
+	// JiraGateway calls Jira through /ex/jira/<cloudId> with a personal API token.
+	JiraGateway Family = "jira_gateway"
 	// Admin is the Atlassian Admin API on the Atlassian API host (paths start
 	// with /admin), called with the org API key.
 	Admin Family = "admin"
@@ -71,6 +73,7 @@ func IsStagingSite(site string) bool {
 var needs = map[Family][]credentials.Kind{
 	PagerDuty:     {credentials.PagerDutyKey},
 	JSMOps:        {credentials.AtlassianEmail, credentials.AtlassianToken},
+	JiraGateway:   {credentials.AtlassianEmail, credentials.AtlassianToken},
 	Admin:         {credentials.OrgAPIKey},
 	Site:          {credentials.AtlassianEmail, credentials.AtlassianToken},
 	SiteAnonymous: nil,
@@ -86,7 +89,7 @@ func (c *Client) host(f Family, site string) (string, error) {
 			return pagerDutyHostEU, nil
 		}
 		return pagerDutyHostUS, nil
-	case JSMOps, Admin:
+	case JSMOps, JiraGateway, Admin:
 		if c.cfg.Staging {
 			return atlassianAPIHostStaging, nil
 		}
@@ -103,7 +106,7 @@ func (c *Client) authorize(r *http.Request, f Family) {
 	switch f {
 	case PagerDuty:
 		r.Header.Set("Authorization", "Token token="+creds.PagerDutyKey.Reveal())
-	case JSMOps, Site:
+	case JSMOps, JiraGateway, Site:
 		r.SetBasicAuth(creds.AtlassianEmail.Value(), creds.AtlassianToken.Reveal())
 	case Admin:
 		r.Header.Set("Authorization", "Bearer "+creds.OrgAPIKey.Reveal())

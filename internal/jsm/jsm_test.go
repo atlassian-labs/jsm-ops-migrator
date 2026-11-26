@@ -140,7 +140,7 @@ func TestFindUserMatchesTheEmail(t *testing.T) {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	r := f.Requests()[0]
-	if r.Method != http.MethodPost || string(r.Body) != `{"emails":["operator@example.com"],"limit":100}` {
+	if r.Method != http.MethodPost || string(r.Body) != `{"emails":["operator@example.com"],"limit":100,"expand":["platformRoles"]}` {
 		t.Fatalf("request %s %s", r.Method, r.Body)
 	}
 }

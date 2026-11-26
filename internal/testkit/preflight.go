@@ -106,6 +106,13 @@ func (c fakeClients) atlassianOK() bool {
 		accepted(c.f.AtlassianToken, c.creds.AtlassianToken.Reveal())
 }
 
+func (c fakeClients) CurrentAccountID(context.Context, string) (string, error) {
+	if !c.atlassianOK() {
+		return "", httperr.ErrUnauthorized
+	}
+	return c.f.AccountID, nil
+}
+
 func (c fakeClients) CheckAccess(_ context.Context, cloudID string) error {
 	c.f.record("ops teams " + cloudID)
 	if !c.atlassianOK() {

@@ -17,6 +17,7 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/admin"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/internal/rest"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/jira"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/ops"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
 )
@@ -69,6 +70,11 @@ func (c *Client) CheckAccess(ctx context.Context, cloudID string) error {
 	return ops.New(c.h, cloudID).Get(ctx, "/v1/teams", nil, &teams)
 }
 
+// CurrentAccountID reads the owner of the personal API token.
+func (c *Client) CurrentAccountID(ctx context.Context, cloudID string) (string, error) {
+	return jira.CurrentAccountID(ctx, c.h, cloudID)
+}
+
 // HasAPI reports whether the site has one of the public APIs that are still
 // being built. None of them is public yet, so HasAPI makes no call and reports
 // each as missing; when one ships, its check goes here.
@@ -119,7 +125,7 @@ func (c *Client) FindUser(ctx context.Context, orgID string, email credentials.S
 	if match.AccountID == "" {
 		return preflight.Account{}, fmt.Errorf("jsm: user search: %w: the organization has no account with that email", httperr.ErrNotFound)
 	}
-	return preflight.Account{AccountID: match.AccountID}, nil
+	return preflight.Account{AccountID: match.AccountID, ActiveOrgAdmin: match.Active() && match.OrgAdmin}, nil
 }
 
 // Poll calls check every interval until it reports done or fails, for the

@@ -276,6 +276,8 @@ func (f *Fake) familyOf(host, path string) family {
 		return adminFamily
 	case host == f.a.Site && strings.HasPrefix(path, teamsPrefix):
 		return teamsFamily
+	case host == f.apiHost() && strings.HasPrefix(path, "/ex/jira/"+f.a.CloudID+jiraPrefix):
+		return jiraFamily
 	case host == f.a.Site && strings.HasPrefix(path, jiraPrefix):
 		return jiraFamily
 	case host == f.a.Site && path == tenantInfo:

@@ -354,11 +354,21 @@ func ContentHash(p Plan) (string, error) {
 			accounts = append(accounts, read.MigrationAccount)
 		}
 	}
+	// A changed identity review format requires a fresh export even when all
+	// proposed users match the previous version.
+	var columns []string
+	for _, item := range n.Items {
+		if item.UserMapping != nil {
+			columns = mappingColumns
+			break
+		}
+	}
 	data, err := encodeJSON(struct {
-		Accounts []MigrationAccount `json:"accounts,omitempty"`
-		Items    []Item             `json:"items"`
-		Messages []messages.Message `json:"messages"`
-	}{accounts, n.Items, n.Messages})
+		MappingColumns []string           `json:"mapping_columns,omitempty"`
+		Accounts       []MigrationAccount `json:"accounts,omitempty"`
+		Items          []Item             `json:"items"`
+		Messages       []messages.Message `json:"messages"`
+	}{columns, accounts, n.Items, n.Messages})
 	if err != nil {
 		return "", err
 	}

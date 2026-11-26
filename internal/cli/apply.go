@@ -104,7 +104,7 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 		return out.emit(env, err)
 	}
 	// The API token runs every call, and it is personal, so its account is
-	// who confirms. No API shows whether it is an org admin.
+	// who confirms.
 	if report.Operator == nil || report.Operator.AccountID == "" {
 		return out.emit(env, errors.New("apply: the org admin check did not find your account, so the confirmation cannot name it"))
 	}

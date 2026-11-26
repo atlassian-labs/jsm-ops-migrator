@@ -54,7 +54,7 @@ func TestEveryCheckPassesWhenAllIsWell(t *testing.T) {
 		ids = append(ids, c.ID)
 		want := preflight.OK
 		if c.ID == preflight.OrgAdmin {
-			want = preflight.Warning // no API returns the org admin role
+			want = preflight.Warning // this fixture has no verified org admin role
 		}
 		if c.Status != want || c.Title == "" || c.Detail == "" {
 			t.Errorf("%s: %s %q, want %s", c.ID, c.Status, c.Detail, want)

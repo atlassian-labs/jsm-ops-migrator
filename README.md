@@ -36,7 +36,18 @@ The CLI will work in three steps:
 
 Use a separate `--workspace` for each migration. The first read of each side binds the workspace to its PagerDuty account host or its JSM cloud ID and organization ID. You can rotate credentials for those accounts. Each plan version writes its own `acceptance-template.yaml`.
 
-Review proposed user identities in `artifacts/plans/v<N>/mapping.csv` inside the workspace. Each row gives the PagerDuty login email, the proposed account ID when available, target-site JSM access, and the reason for the proposed action. A directory miss can also mean the account exists outside the organization. This step produces proposals only. After a run, `artifacts/runs/<id>/mapping.csv` lists the links actually made during that run. Use the file under `plans/` for identity review.
+Review proposed user identities in `artifacts/plans/v<N>/mapping.csv` inside the workspace. Each row gives the PagerDuty login email, the proposed account ID when available, target-site JSM access, and the reason for the proposed action. A directory miss can also mean the account exists outside the organization. After a run, `artifacts/runs/<id>/mapping.csv` lists the links actually made during that run. Use the file under `plans/` for identity review. Run `plan` again when upgrading from a build that exported a seven-column CSV to get a version with review fields.
+
+For example, to approve plan v1 from a workspace you have logged into:
+
+```sh
+jsm-ops-migrator plan --workspace "$WORKSPACE"
+cp "$WORKSPACE/artifacts/plans/v1/mapping.csv" reviewed.csv
+# Review every row and edit the review_decision column.
+jsm-ops-migrator plan approve-mappings --workspace "$WORKSPACE" --version 1 --csv reviewed.csv
+```
+
+Use the version printed by `plan`. Set `review_decision` to `accept` for an eligible proposed account, `defer` to leave a user unresolved, or `skip` to exclude them. Keep every row and leave the other columns intact. An active organization admin must approve with their own Atlassian API token. The CLI checks the token owner's account ID and directory role, then writes `mapping-approval.json` beside the plan with the approver, time, plan hash, and decisions. Approval is local. A new plan version requires a new review.
 
 Use `resume` to reconcile a journaled create by looking up its JSM object. Independent items can continue while dependent items wait. If you verify in JSM that no object was made, wait ten minutes from the recorded attempt and run `resume --skip-create <item-key>`. Repeat `--skip-create` for each verified item in the same run. A fresh lookup must also find no match for each skip. The run leaves skipped creates for a new plan and approval. When JSM has acknowledged a create, resume needs to identify its object.
 

@@ -24,6 +24,7 @@ type UserMatch struct {
 	Incomplete       bool   `json:"incomplete,omitempty"`
 	Ambiguous        bool   `json:"ambiguous,omitempty"`
 	SiteAccess       string `json:"site_access,omitempty"` // "yes", "no", or empty when the expansion was unavailable.
+	OrgAdmin         bool   `json:"org_admin,omitempty"`
 }
 
 // Active reports whether the directory identified one active account.
@@ -86,16 +87,19 @@ func (c *Client) searchEmailBatch(ctx context.Context, path, resource string, em
 	}{Emails: emails, Limit: searchLimit}
 	if resource != "" {
 		body.Expand = []string{"productAccess"}
+	} else {
+		body.Expand = []string{"platformRoles"}
 	}
 	seen := map[string]bool{}
 	for {
 		var page struct {
 			Data []struct {
-				Email            string `json:"email"`
-				AccountID        string `json:"accountId"`
-				AccountStatus    string `json:"accountStatus"`
-				MembershipStatus string `json:"membershipStatus"`
-				Status           string `json:"status"`
+				Email            string   `json:"email"`
+				AccountID        string   `json:"accountId"`
+				AccountStatus    string   `json:"accountStatus"`
+				MembershipStatus string   `json:"membershipStatus"`
+				Status           string   `json:"status"`
+				PlatformRoles    []string `json:"platformRoles"`
 				ProductAccess    []struct {
 					ID string `json:"id"`
 				} `json:"productAccess"`
@@ -125,6 +129,9 @@ func (c *Client) searchEmailBatch(ctx context.Context, path, resource string, em
 				return nil
 			}
 			match := UserMatch{AccountID: user.AccountID, AccountStatus: user.AccountStatus, MembershipStatus: user.MembershipStatus, Status: user.Status}
+			if resource == "" {
+				match.OrgAdmin = slices.Contains(user.PlatformRoles, "atlassian/org-admin")
+			}
 			if resource != "" && user.ProductAccess != nil {
 				match.SiteAccess = "no"
 				for _, product := range user.ProductAccess {

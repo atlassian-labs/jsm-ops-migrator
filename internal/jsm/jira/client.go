@@ -33,6 +33,25 @@ func New(h *httpx.Client, site string) *Client {
 	return &Client{c: rest.Client{H: h, Family: httpx.Site, Site: site, Prefix: "/rest/api/3"}}
 }
 
+// CurrentAccountID identifies the token owner through the gateway, which supports
+// scoped and classic API tokens.
+func CurrentAccountID(ctx context.Context, h *httpx.Client, cloudID string) (string, error) {
+	if err := rest.CheckSegment("cloud ID", cloudID); err != nil {
+		return "", err
+	}
+	c := rest.Client{H: h, Family: httpx.JiraGateway, Prefix: "/ex/jira/" + cloudID + "/rest/api/3"}
+	var user struct {
+		AccountID string `json:"accountId"`
+	}
+	if err := c.Get(ctx, "/myself", nil, &user); err != nil {
+		return "", err
+	}
+	if err := rest.CheckSegment("account ID", user.AccountID); err != nil {
+		return "", err
+	}
+	return user.AccountID, nil
+}
+
 // Get reads path with query, which may be nil, and decodes the answer into v.
 func (c *Client) Get(ctx context.Context, path string, query url.Values, v any) error {
 	return c.c.Get(ctx, path, query, v)
