@@ -132,6 +132,16 @@ func (e *Env) Steps(creds credentials.Set) ([]engine.Step, error) {
 	if e.newSteps == nil {
 		return engine.Placeholders(), nil
 	}
+	// Noninteractive apply checks the plan's steps before running preflight.
+	site, err := normalizeSite(e.Config.Site)
+	if err != nil {
+		return nil, err
+	}
+	region, err := pagerDutyRegion(e.Config.PagerDutyRegion)
+	if err != nil {
+		return nil, err
+	}
+	e.Config.Site, e.Config.PagerDutyRegion = site, region
 	return e.newSteps(e, creds)
 }
 

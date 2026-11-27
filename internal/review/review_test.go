@@ -374,6 +374,27 @@ func TestCompare(t *testing.T) {
 	}
 }
 
+func TestCompareUserMapping(t *testing.T) {
+	plan := func(accountID string) review.Plan {
+		return review.Plan{Items: []review.Item{{
+			Key: "users/PU1", Summary: "Existing account",
+			UserMapping: &review.UserMapping{AccountID: accountID},
+		}}}
+	}
+	prev := plan("account-a")
+	prev.Version = 1
+	if diff := review.Compare(&prev, plan("account-a")); !diff.Empty() {
+		t.Fatalf("equal mappings differ: %+v", diff)
+	}
+	diff := review.Compare(&prev, plan("account-b"))
+	if len(diff.Changed) != 1 || strings.Join(diff.Changed[0].Fields, ",") != "user_mapping" {
+		t.Fatalf("changed account missing from diff: %+v", diff)
+	}
+	if out := string(review.RenderDiff(diff)); !strings.Contains(out, `account ID ("account-a", now "account-b")`) {
+		t.Fatal(out)
+	}
+}
+
 func filledTemplate(t *testing.T, p review.Plan, hash string) []byte {
 	t.Helper()
 	tmpl := review.AcceptanceTemplate(p, hash)

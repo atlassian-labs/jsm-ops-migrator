@@ -245,6 +245,12 @@ func envVarList() string {
 	return strings.Join(names, ", ")
 }
 
+// Equal reports whether two client configurations use the same credentials.
+func (s Set) Equal(other Set) bool {
+	return s.PagerDutyKey.Equal(other.PagerDutyKey) && s.OrgAPIKey.Equal(other.OrgAPIKey) &&
+		s.AtlassianToken.Equal(other.AtlassianToken) && s.AtlassianEmail.Value() == other.AtlassianEmail.Value()
+}
+
 // Equal reports whether two secrets hold the same value, in constant time.
 func (s Secret) Equal(o Secret) bool {
 	return subtle.ConstantTimeCompare([]byte(s.Reveal()), []byte(o.Reveal())) == 1

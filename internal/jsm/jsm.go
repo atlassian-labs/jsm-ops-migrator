@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
@@ -106,25 +105,21 @@ func (c *Client) Orgs(ctx context.Context) ([]preflight.Org, error) {
 // httperr.ErrNotFound when the organization has no such account. Neither the
 // error nor the request's log line holds the email.
 func (c *Client) FindUser(ctx context.Context, orgID string, email credentials.Sensitive) (preflight.Account, error) {
-	if err := rest.CheckSegment("organization id", orgID); err != nil {
+	matches, err := admin.New(c.h).FindUsers(ctx, orgID, []credentials.Sensitive{email})
+	if err != nil {
 		return preflight.Account{}, err
 	}
-	var answer struct {
-		Data []struct {
-			AccountID string `json:"accountId"`
-			Email     string `json:"email"`
-		} `json:"data"`
+	match := matches[0]
+	if match.Incomplete {
+		return preflight.Account{}, fmt.Errorf("jsm: user search: %w: incomplete directory record for the operator", httperr.ErrBadResponse)
 	}
-	path := "/v2/orgs/" + orgID + "/directories/-/users/search"
-	if err := admin.New(c.h).Search(ctx, path, map[string]any{"emails": []string{email.Value()}}, &answer); err != nil {
-		return preflight.Account{}, err
+	if match.Ambiguous {
+		return preflight.Account{}, fmt.Errorf("jsm: user search: %w: conflicting directory records for the operator", httperr.ErrBadResponse)
 	}
-	for _, u := range answer.Data {
-		if u.AccountID != "" && strings.EqualFold(u.Email, email.Value()) {
-			return preflight.Account{AccountID: u.AccountID}, nil
-		}
+	if match.AccountID == "" {
+		return preflight.Account{}, fmt.Errorf("jsm: user search: %w: the organization has no account with that email", httperr.ErrNotFound)
 	}
-	return preflight.Account{}, fmt.Errorf("jsm: user search: %w: the organization has no account with that email", httperr.ErrNotFound)
+	return preflight.Account{AccountID: match.AccountID}, nil
 }
 
 // Poll calls check every interval until it reports done or fails, for the

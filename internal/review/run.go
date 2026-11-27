@@ -292,7 +292,8 @@ func MappingCSV(r Run) ([]byte, error) {
 // starts with = + - or @ gets a leading ', as OWASP recommends. The IDs come
 // from the APIs, so the record is written whatever they hold.
 func csvCell(s string) string {
-	if s != "" && strings.ContainsAny(s[:1], "=+-@") {
+	trimmed := strings.TrimLeft(s, " ")
+	if trimmed != "" && strings.ContainsAny(trimmed[:1], "=+-@\t\r\n") {
 		return "'" + s
 	}
 	return s

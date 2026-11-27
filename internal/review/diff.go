@@ -31,8 +31,7 @@ type Diff struct {
 // Change is an item in both versions that differs.
 type Change struct {
 	Before, After Item
-	// Fields names what differs: action, summary, depends_on, pagerduty, jsm
-	// or payload.
+	// Fields names the item fields that differ between versions.
 	Fields []string
 }
 
@@ -132,13 +131,14 @@ func changedFields(a, b Item) []string {
 	add("action", a.Action != b.Action)
 	add("summary", a.Summary != b.Summary)
 	add("depends_on", !slices.Equal(a.DependsOn, b.DependsOn))
-	add("pagerduty", !sameRef(a.PagerDuty, b.PagerDuty))
-	add("jsm", !sameRef(a.JSM, b.JSM))
+	add("pagerduty", !sameValue(a.PagerDuty, b.PagerDuty))
+	add("jsm", !sameValue(a.JSM, b.JSM))
+	add("user_mapping", !sameValue(a.UserMapping, b.UserMapping))
 	add("payload", !samePayload(a.Payload, b.Payload))
 	return out
 }
 
-func sameRef(a, b *Ref) bool {
+func sameValue[T comparable](a, b *T) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
