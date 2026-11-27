@@ -185,13 +185,23 @@ func TestScripts(t *testing.T) {
 	testscript.Run(t, testscript.Params{
 		Dir: "testdata/script",
 		Cmds: map[string]func(*testscript.TestScript, bool, []string){
+			"same-mapping-proposals": func(ts *testscript.TestScript, neg bool, args []string) {
+				if neg || len(args) != 2 {
+					ts.Fatalf("usage: same-mapping-proposals export1 export2")
+				}
+				meta1, users1, ok1 := strings.Cut(ts.ReadFile(args[0]), "\n")
+				meta2, users2, ok2 := strings.Cut(ts.ReadFile(args[1]), "\n")
+				if !ok1 || !ok2 || meta1 == meta2 || users1 != users2 {
+					ts.Fatalf("expected different plan identifiers and identical mapping columns and user rows")
+				}
+			},
 			"review-all": func(ts *testscript.TestScript, neg bool, args []string) {
 				if neg || len(args) < 2 {
 					ts.Fatalf("usage: review-all file default-decision [accepted-user-id ...]")
 				}
 				rows, err := csv.NewReader(strings.NewReader(ts.ReadFile(args[0]))).ReadAll()
 				ts.Check(err)
-				for _, row := range rows[1:] {
+				for _, row := range rows[2:] {
 					row[len(row)-1] = args[1]
 					if slices.Contains(args[2:], row[0]) {
 						row[len(row)-1] = "accept"

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
@@ -31,7 +30,9 @@ type MappingDecision struct {
 	AccountID   string `json:"account_id,omitempty"`
 }
 
-var mappingColumns = []string{"pd_user_id", "pd_email", "pd_role", "proposed_account_id", "target_jsm_access", "proposed_action", "reason", "plan_version", "plan_hash", "review_decision"}
+const mappingPlanKey = "plan_hash"
+
+var mappingColumns = []string{"pd_user_id", "pd_email", "pd_role", "proposed_account_id", "target_jsm_access", "proposed_action", "reason", "review_decision"}
 
 func (m UserMapping) canAccept(action Action) bool {
 	if m.Decision == "propose_invite" {
@@ -47,9 +48,9 @@ func (m UserMapping) decisionChoices(action Action) string {
 	return "defer / skip"
 }
 
-func mappingRow(it Item, version int, hash string) []string {
+func mappingRow(it Item) []string {
 	m := it.UserMapping
-	row := []string{it.PagerDuty.ID, m.Email, m.Role, m.AccountID, m.SiteAccess, m.Decision, messages.Clean(it.Summary), strconv.Itoa(version), hash}
+	row := []string{it.PagerDuty.ID, m.Email, m.Role, m.AccountID, m.SiteAccess, m.Decision, messages.Clean(it.Summary)}
 	for i, value := range row {
 		row[i] = csvCell(value)
 	}
@@ -59,6 +60,12 @@ func mappingRow(it Item, version int, hash string) []string {
 func proposedMappings(p Plan, hash string) ([]byte, error) {
 	var b bytes.Buffer
 	w := csv.NewWriter(&b)
+	// Keep the sheet rectangular so spreadsheet editors can round-trip it.
+	metadata := make([]string, len(mappingColumns))
+	metadata[0], metadata[1] = mappingPlanKey, hash
+	if err := w.Write(metadata); err != nil {
+		return nil, err
+	}
 	if err := w.Write(mappingColumns); err != nil {
 		return nil, err
 	}
@@ -67,7 +74,7 @@ func proposedMappings(p Plan, hash string) ([]byte, error) {
 			continue
 		}
 		prompt := "Replace with " + it.UserMapping.decisionChoices(it.Action)
-		if err := w.Write(append(mappingRow(it, p.Version, hash), prompt)); err != nil {
+		if err := w.Write(append(mappingRow(it), prompt)); err != nil {
 			return nil, err
 		}
 	}
@@ -75,38 +82,42 @@ func proposedMappings(p Plan, hash string) ([]byte, error) {
 	return b.Bytes(), w.Error()
 }
 
-// A supported header fits on one line. Parse it separately to select the
-// spreadsheet's delimiter without guessing from any user-controlled data cell.
-func mappingReader(r io.Reader) (*csv.Reader, error) {
+// Select the spreadsheet's delimiter from the metadata, before reading user data.
+func mappingReader(r io.Reader, version int, hash string) (*csv.Reader, error) {
 	input := bufio.NewReader(r)
 	line, err := input.ReadSlice('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("reading mapping CSV header: %w", err)
+		return nil, fmt.Errorf("reading mapping CSV metadata: %w", err)
 	}
 	line = bytes.TrimPrefix(line, []byte("\uFEFF"))
 	for _, sep := range []rune{',', ';'} {
-		headerReader := csv.NewReader(bytes.NewReader(line))
-		headerReader.Comma = sep
-		header, err := headerReader.Read()
-		if err != nil {
+		first := csv.NewReader(bytes.NewReader(line))
+		first.Comma = sep
+		meta, err := first.Read()
+		if err != nil || len(meta) < 2 || meta[0] != mappingPlanKey {
 			continue
 		}
-		if slices.Equal(header, mappingColumns[:7]) {
-			return nil, errors.New("older seven-column mapping CSV: run plan again and review the new export")
+		if len(meta) > len(mappingColumns) || slices.ContainsFunc(meta[2:], func(s string) bool { return s != "" }) {
+			return nil, errors.New("invalid mapping CSV metadata: keep the first record as exported")
 		}
-		if slices.Equal(header, mappingColumns) {
-			reader := csv.NewReader(input)
-			reader.Comma, reader.FieldsPerRecord = sep, -1
-			return reader, nil
+		if meta[1] != hash {
+			return nil, fmt.Errorf("mapping CSV plan identifier differs from plan v%d: review the CSV exported for this version", version)
 		}
+		reader := csv.NewReader(input)
+		reader.Comma, reader.FieldsPerRecord = sep, -1
+		header, err := reader.Read()
+		if err != nil || !slices.Equal(header, mappingColumns) {
+			return nil, errors.New("invalid mapping CSV header: keep the exported column names in the second record")
+		}
+		return reader, nil
 	}
-	return nil, errors.New("invalid mapping CSV header: use the columns exported by this plan with comma or semicolon separators")
+	return nil, errors.New("missing mapping CSV plan identifier: run plan and review a fresh copy of its export with comma or semicolon separators")
 }
 
 // ImportMappings checks immutable cells against the sealed plan, independent
 // of CSV row order. Never echo cell contents in a validation error.
 func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error) {
-	reader, err := mappingReader(r)
+	reader, err := mappingReader(r, p.Version, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +142,7 @@ func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error)
 	if len(rows) == 0 {
 		return nil, errors.New("this plan has no user mappings")
 	}
-	for n := 2; ; n++ {
+	for n := 3; ; n++ {
 		row, err := reader.Read()
 		if errors.Is(err, io.EOF) {
 			break
@@ -149,7 +160,7 @@ func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error)
 		if !ok {
 			return nil, fmt.Errorf("unknown or duplicate PagerDuty user at record %d", n)
 		}
-		if !slices.Equal(row[:len(row)-1], mappingRow(s.item, p.Version, hash)) {
+		if !slices.Equal(row[:len(row)-1], mappingRow(s.item)) {
 			return nil, fmt.Errorf("record %d differs from plan v%d; only review_decision may be edited", n, p.Version)
 		}
 		d := &decisions[s.index]

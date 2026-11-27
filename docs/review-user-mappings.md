@@ -27,7 +27,13 @@ REVIEWED="$PLAN_DIR/reviewed-mapping.csv"
 cp -i "$PLAN_DIR/mapping.csv" "$REVIEWED"
 ```
 
-Open the copy in a text editor or spreadsheet. Row 1 contains the column names. Starting with row 2, replace the entire prompt in the last column, `review_decision`, with **one word**. The prompt lists the choices available for that user.
+You can rename or move the working copy. Open it in a text editor or spreadsheet.
+
+| Row | What to do |
+| --- | --- |
+| 1 | Keep the `plan_hash` record. Its second cell identifies the exact plan that produced the file. Leave the remaining cells empty. |
+| 2 | Keep the column names in their original order. |
+| 3 onward | For every user, replace the entire prompt in the last column, `review_decision`, with **one word** from the choices shown for that user. You can reorder the user rows. |
 
 | What you see in `proposed_action` | What to check | Example decision to type |
 | --- | --- | --- |
@@ -47,10 +53,9 @@ For example, if Taylor's row shows `map_existing` and you verified the account, 
 | `pd_user_id`, `pd_email`, `pd_role` | Identify the source user, show the login email used for matching, and explain role-based exclusions. |
 | `proposed_account_id`, `target_jsm_access` | Identify the proposed destination account and show whether the directory confirmed access to JSM on this site. A blank means the value is unknown. |
 | `proposed_action`, `reason` | Show the proposed outcome and the evidence or next step for this user. |
-| `plan_version`, `plan_hash` | Bind each row to the reviewed plan so rows copied from a different export are rejected. |
 | `review_decision` | Record the reviewer's choice for this user. |
 
-Save as UTF-8 CSV. Comma and semicolon separators are supported. In a spreadsheet, import the columns as text to preserve IDs. If you have an older seven-column export, run `plan` with the current CLI and use the new export.
+Save as UTF-8 CSV. Comma and semicolon separators are supported. In a spreadsheet, import the columns as text to preserve IDs. If you have an older export that starts with column names, run `plan` with the current CLI and review a fresh copy of its export.
 
 ## 3. Approve the reviewed plan
 
@@ -60,7 +65,7 @@ An active organization admin runs this in the original workspace with their own 
 jsm-ops-migrator plan approve-mappings --workspace "$WORKSPACE" --version "$VERSION" --csv "$REVIEWED"
 ```
 
-If the CLI reports an invalid decision, use the record number to find the row in your CSV and choose one listed value. If it reports that the plan version is stale, review a fresh copy from the latest plan.
+If the CLI reports an invalid decision, use the record number to find the row in your CSV and choose one listed value. If the version is stale or the file’s plan identifier differs, copy `mapping.csv` from the latest plan directory and review its proposals again. A previous export can have the same users and still belong to a different plan.
 
 ## 4. Check the receipt
 
@@ -68,6 +73,6 @@ If the CLI reports an invalid decision, use the record number to find the row in
 cat "$PLAN_DIR/mapping-approval.json"
 ```
 
-Check `approved_by` for the admin's account ID, `approved_at` for the time, and `plan_version` and `plan_hash` against the CSV. Under `decisions`, check each PagerDuty user ID and its decision. An accepted existing account includes its destination account ID. For an approved invitation, `apply` obtains the account ID when it sends the invitation.
+Check that `plan_version` matches the version you approved and `plan_hash` matches the second cell in row 1 of your reviewed CSV. Check `approved_by` for the admin's account ID and `approved_at` for the time. Under `decisions`, check each PagerDuty user ID and its decision. An accepted existing account includes its destination account ID. For an approved invitation to a previously unmatched login, `apply` obtains the account ID from the invitation response.
 
 Repeating the same approval with the same admin preserves the receipt. Before apply starts, a different decision or approver adds the earlier revision to `previous_approvals`. A new plan version needs its own review.
