@@ -183,3 +183,19 @@ func TestPollIsTheHTTPLayersPoll(t *testing.T) {
 		t.Fatalf("got %v after %d checks", err, n)
 	}
 }
+
+func TestFindUserRejectsUnverifiableOperator(t *testing.T) {
+	for name, records := range map[string][]map[string]string{
+		"missing ID":      {{"email": "operator@example.com"}},
+		"conflicting IDs": {{"email": "operator@example.com", "accountId": "a"}, {"email": "operator@example.com", "accountId": "b"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, c := fake(t)
+			f.Answer(http.MethodPost, f.AdminPath("/v2/orgs/org-1/directories/-/users/search"), 200, map[string]any{"data": records})
+			got, err := c.FindUser(context.Background(), "org-1", credentials.NewSensitive("operator@example.com"))
+			if got.AccountID != "" || !errors.Is(err, httperr.ErrBadResponse) {
+				t.Fatalf("got %+v, %v", got, err)
+			}
+		})
+	}
+}

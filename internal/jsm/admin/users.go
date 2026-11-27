@@ -17,15 +17,20 @@ const searchLimit = 100
 // An empty match means there was no directory result. An account outside the
 // organization can still own that email.
 type UserMatch struct {
-	AccountID     string
-	AccountStatus string
-	Ambiguous     bool
-	SiteAccess    string // "yes", "no", or empty when the expansion was unavailable.
+	AccountID        string `json:"account_id,omitempty"`
+	AccountStatus    string `json:"account_status,omitempty"`
+	MembershipStatus string `json:"membership_status,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Incomplete       bool   `json:"incomplete,omitempty"`
+	Ambiguous        bool   `json:"ambiguous,omitempty"`
+	SiteAccess       string `json:"site_access,omitempty"` // "yes", "no", or empty when the expansion was unavailable.
 }
 
 // Active reports whether the directory identified one active account.
 func (m UserMatch) Active() bool {
-	return !m.Ambiguous && m.AccountID != "" && m.AccountStatus == "active"
+	return !m.Incomplete && !m.Ambiguous && m.AccountID != "" && m.AccountStatus == "active" &&
+		(m.MembershipStatus == "active" || m.Status == "active") &&
+		(m.MembershipStatus == "" || m.MembershipStatus == "active") && (m.Status == "" || m.Status == "active")
 }
 
 // FindUsers returns one match per input email in input order. It reads every
@@ -86,10 +91,12 @@ func (c *Client) searchEmailBatch(ctx context.Context, path, resource string, em
 	for {
 		var page struct {
 			Data []struct {
-				Email         string `json:"email"`
-				AccountID     string `json:"accountId"`
-				AccountStatus string `json:"accountStatus"`
-				ProductAccess []struct {
+				Email            string `json:"email"`
+				AccountID        string `json:"accountId"`
+				AccountStatus    string `json:"accountStatus"`
+				MembershipStatus string `json:"membershipStatus"`
+				Status           string `json:"status"`
+				ProductAccess    []struct {
 					ID string `json:"id"`
 				} `json:"productAccess"`
 			} `json:"data"`
@@ -102,20 +109,37 @@ func (c *Client) searchEmailBatch(ctx context.Context, path, resource string, em
 			return fmt.Errorf("user search: %w: missing directory results", httperr.ErrBadResponse)
 		}
 		for _, user := range page.Data {
-			if user.Email == "" || rest.CheckSegment("account ID", user.AccountID) != nil {
-				return fmt.Errorf("user search: %w: incomplete directory record", httperr.ErrBadResponse)
+			if user.Email == "" {
+				// An unattributable row could conflict with any match in this batch.
+				// Isolate each address before trusting either a match or a miss.
+				if len(emails) == 1 {
+					matches[emails[0]] = UserMatch{Incomplete: true}
+					return nil
+				}
+				for _, email := range emails {
+					matches[email] = UserMatch{}
+					if err := c.searchEmailBatch(ctx, path, resource, []string{email}, matches); err != nil {
+						return err
+					}
+				}
+				return nil
 			}
-			match := UserMatch{AccountID: user.AccountID, AccountStatus: user.AccountStatus}
+			match := UserMatch{AccountID: user.AccountID, AccountStatus: user.AccountStatus, MembershipStatus: user.MembershipStatus, Status: user.Status}
 			if resource != "" && user.ProductAccess != nil {
 				match.SiteAccess = "no"
 				for _, product := range user.ProductAccess {
 					if product.ID == "" {
-						return fmt.Errorf("user search: %w: missing product resource ID", httperr.ErrBadResponse)
+						match.SiteAccess = ""
+						continue
 					}
 					if product.ID == resource {
 						match.SiteAccess = "yes"
+						break
 					}
 				}
+			}
+			if rest.CheckSegment("account ID", user.AccountID) != nil {
+				match = UserMatch{Incomplete: true}
 			}
 			for _, email := range emails {
 				if strings.EqualFold(email, user.Email) {

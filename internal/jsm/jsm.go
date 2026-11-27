@@ -110,6 +110,9 @@ func (c *Client) FindUser(ctx context.Context, orgID string, email credentials.S
 		return preflight.Account{}, err
 	}
 	match := matches[0]
+	if match.Incomplete {
+		return preflight.Account{}, fmt.Errorf("jsm: user search: %w: incomplete directory record for the operator", httperr.ErrBadResponse)
+	}
 	if match.Ambiguous {
 		return preflight.Account{}, fmt.Errorf("jsm: user search: %w: conflicting directory records for the operator", httperr.ErrBadResponse)
 	}

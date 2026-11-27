@@ -23,32 +23,41 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/users"
 )
 
-// clientsFactory builds the API clients a command uses from the credentials
-// it checks.
-type clientsFactory func(env *cli.Env, creds credentials.Set) (preflight.Clients, error)
-
-// apiClients returns the factory for the real API clients, all built on one
-// HTTP layer client from base with the credentials, the configured PagerDuty
-// region and, for a staging site, the staging API host, so its limits hold
-// across them. The binary's tests pass a base that reaches fakes.
-func apiClients(base httpx.Config) clientsFactory {
-	return func(env *cli.Env, creds credentials.Set) (preflight.Clients, error) {
-		h, err := httpClient(base, env, creds)
-		if err != nil {
-			return preflight.Clients{}, err
-		}
-		atlassian := jsm.New(h)
-		return preflight.Clients{PagerDuty: pd.New(h), Atlassian: atlassian, Admin: atlassian}, nil
-	}
+// commandHTTP reuses the rate limiter between preflight and discovery. Login
+// can retry in another region or with new credentials in the same command.
+type commandHTTP struct {
+	base    httpx.Config
+	env     *cli.Env
+	creds   credentials.Set
+	region  httpx.Region
+	staging bool
+	client  *httpx.Client
 }
 
-func httpClient(base httpx.Config, env *cli.Env, creds credentials.Set) (*httpx.Client, error) {
-	cfg := base
+func (c *commandHTTP) apiClients(env *cli.Env, creds credentials.Set) (preflight.Clients, error) {
+	h, err := c.get(env, creds)
+	if err != nil {
+		return preflight.Clients{}, err
+	}
+	atlassian := jsm.New(h)
+	return preflight.Clients{PagerDuty: pd.New(h), Atlassian: atlassian, Admin: atlassian}, nil
+}
+
+func (c *commandHTTP) get(env *cli.Env, creds credentials.Set) (*httpx.Client, error) {
+	cfg := c.base
 	cfg.Credentials = creds
 	cfg.PagerDutyRegion = httpx.Region(env.Config.PagerDutyRegion)
 	cfg.Staging = httpx.IsStagingSite(env.Config.Site)
 	cfg.Logger = env.Logger
-	return httpx.New(cfg)
+	if c.client != nil && c.env == env && c.region == cfg.PagerDutyRegion && c.staging == cfg.Staging && c.creds.Equal(creds) {
+		return c.client, nil
+	}
+	h, err := httpx.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	c.env, c.region, c.staging, c.creds, c.client = env, cfg.PagerDutyRegion, cfg.Staging, creds, h
+	return h, nil
 }
 
 func main() { os.Exit(run(credentials.OSKeychain(), &httpx.Config{})) }
@@ -72,9 +81,10 @@ func run(kc credentials.Keychain, base *httpx.Config) int {
 		ForceExit: func() { os.Exit(130) },
 	}
 	if base != nil {
-		opts.NewClients = apiClients(*base)
+		clients := &commandHTTP{base: *base}
+		opts.NewClients = clients.apiClients
 		opts.NewSteps = func(env *cli.Env, creds credentials.Set) ([]engine.Step, error) {
-			h, err := httpClient(*base, env, creds)
+			h, err := clients.get(env, creds)
 			if err != nil {
 				return nil, err
 			}

@@ -32,13 +32,13 @@ func TestFindUsersBatchesAndFollowsPages(t *testing.T) {
 		emails[i] = credentials.NewSensitive(fmt.Sprintf("person%d@example.com", i))
 	}
 	emails = append(emails, emails[0])
-	active := map[string]string{"email": "Person0@example.com", "accountId": "a", "accountStatus": "active"}
+	active := map[string]string{"email": "Person0@example.com", "accountId": "a", "accountStatus": "active", "membershipStatus": "active"}
 	suspended := map[string]string{"email": "person99@example.com", "accountId": "b", "accountStatus": "inactive"}
-	conflict := map[string]string{"email": "person1@example.com", "accountId": "c", "accountStatus": "active"}
+	conflict := map[string]string{"email": "person1@example.com", "accountId": "c", "accountStatus": "active", "membershipStatus": "active"}
 	f.Fail(http.MethodPost, searchPath,
 		jsmfake.Fault{Status: 200, Body: searchPage("cursor-2", active, conflict)},
 		jsmfake.Fault{Status: 200, Body: searchPage("", active, suspended,
-			map[string]string{"email": "person1@example.com", "accountId": "d", "accountStatus": "active"})})
+			map[string]string{"email": "person1@example.com", "accountId": "d", "accountStatus": "active", "membershipStatus": "active"})})
 	f.Answer(http.MethodPost, searchPath, 200, searchPage(""))
 	got, err := c.FindUsers(context.Background(), "org-1", emails)
 	if err != nil {
@@ -86,17 +86,48 @@ func TestIncompleteSearchCannotReportMissingUsers(t *testing.T) {
 	}{
 		{"read failed", http.StatusForbidden, nil, httperr.ErrForbidden},
 		{"missing data", 200, map[string]any{}, httperr.ErrBadResponse},
-		{"missing ID", 200, searchPage("", map[string]string{"email": "person@example.com"}), httperr.ErrBadResponse},
 		{"cursor repeated", 200, searchPage("again"), httperr.ErrBadResponse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, c := fake(t)
-			f.Fail(http.MethodPost, searchPath, jsmfake.Fault{Status: 200, Body: searchPage("again", map[string]string{"email": "person@example.com", "accountId": "a", "accountStatus": "active"})})
+			f.Fail(http.MethodPost, searchPath, jsmfake.Fault{Status: 200, Body: searchPage("again", map[string]string{"email": "person@example.com", "accountId": "a", "accountStatus": "active", "membershipStatus": "active"})})
 			f.Answer(http.MethodPost, searchPath, tc.status, tc.body)
 			got, err := c.FindUsers(context.Background(), "org-1", []credentials.Sensitive{credentials.NewSensitive("person@example.com")})
 			if got != nil || !errors.Is(err, tc.want) || strings.Contains(err.Error(), "person@") {
 				t.Fatalf("got %+v, %v", got, err)
 			}
 		})
+	}
+}
+
+func TestActiveRequiresOrganizationMembership(t *testing.T) {
+	for _, tc := range []struct {
+		membership, status string
+		active             bool
+	}{
+		{"active", "active", true}, {"active", "", true}, {"", "active", true}, {"", "", false},
+		{"suspended", "active", false}, {"no_membership", "", false}, {"active", "deactivated", false}, {"", "suspended", false},
+	} {
+		f, c := fake(t)
+		f.Answer(http.MethodPost, searchPath, 200, searchPage("", map[string]string{"email": "user@example.com", "accountId": "id", "accountStatus": "active", "membershipStatus": tc.membership, "status": tc.status}))
+		got, err := c.FindSiteUsers(context.Background(), "org-1", "site", []credentials.Sensitive{credentials.NewSensitive("user@example.com")})
+		if err != nil || got[0].Active() != tc.active {
+			t.Fatalf("%+v: %+v, %v", tc, got, err)
+		}
+	}
+}
+
+func TestUnattributableRowIsIsolatedToItsEmail(t *testing.T) {
+	f, c := fake(t)
+	missingEmail := map[string]string{"accountId": "hidden"}
+	valid := map[string]string{"email": "valid@example.com", "accountId": "valid", "accountStatus": "active", "membershipStatus": "active"}
+	f.Fail(http.MethodPost, searchPath,
+		jsmfake.Fault{Status: 200, Body: searchPage("", valid, missingEmail)},
+		jsmfake.Fault{Status: 200, Body: searchPage("", valid)},
+		jsmfake.Fault{Status: 200, Body: searchPage("", missingEmail)},
+	)
+	got, err := c.FindSiteUsers(context.Background(), "org-1", "site", []credentials.Sensitive{credentials.NewSensitive("valid@example.com"), credentials.NewSensitive("hidden@example.com")})
+	if err != nil || !got[0].Active() || !got[1].Incomplete || got[1].Active() {
+		t.Fatalf("got %+v, %v", got, err)
 	}
 }

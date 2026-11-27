@@ -39,12 +39,12 @@ exec jsm-ops-migrator plan --only pagerduty
 stdout 'Plan v1 is unchanged'
 
 # Without a terminal, the acceptance file is the confirmation.
-! exec jsm-ops-migrator apply
+! exec jsm-ops-migrator apply --pagerduty-region EU
 stderr 'plan v1 needs a confirmation: fill in .*acceptance-template.yaml and give it with --accept-file'
 ! exists $W/runs
 
 exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
-stdout 'of plan v1: [0-7] of 7 items done'
+stdout 'of plan v1: 7 of 7 items done'
 exists $W/plans/v1/confirmation.md
 grep 'account-of-org-1' $W/plans/v1/confirmation.md
 ! exists $WORK/home/jsm-ops-migrator/active-run.json
@@ -82,4 +82,5 @@ env JSM_OPS_MIGRATOR_TEST_DIRECTORY_DENIED=1
 ! exec jsm-ops-migrator plan --only jsm
 stdout 'Read JSM: incomplete'
 grep 'users_jsm_read' $W/plans/v4/risk-queue.md
+! grep 'lookup_required' $W/plans/v4/risk-queue.md
 ! grep 'review_directory_miss' $W/plans/v4/mapping.csv

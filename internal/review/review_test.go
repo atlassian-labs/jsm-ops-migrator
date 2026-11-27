@@ -382,12 +382,16 @@ func TestCompareUserMapping(t *testing.T) {
 		}}}
 	}
 	prev := plan("account-a")
+	prev.Version = 1
 	if diff := review.Compare(&prev, plan("account-a")); !diff.Empty() {
 		t.Fatalf("equal mappings differ: %+v", diff)
 	}
 	diff := review.Compare(&prev, plan("account-b"))
 	if len(diff.Changed) != 1 || strings.Join(diff.Changed[0].Fields, ",") != "user_mapping" {
 		t.Fatalf("changed account missing from diff: %+v", diff)
+	}
+	if out := string(review.RenderDiff(diff)); !strings.Contains(out, `account ID ("account-a", now "account-b")`) {
+		t.Fatal(out)
 	}
 }
 

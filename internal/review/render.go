@@ -180,6 +180,9 @@ func RenderDiff(d Diff) []byte {
 			fields := make([]string, len(c.Fields))
 			for i, f := range c.Fields {
 				fields[i] = f
+				if f == "user_mapping" {
+					fields[i] = mappingChange(c.Before.UserMapping, c.After.UserMapping)
+				}
 				if f == "action" {
 					fields[i] = fmt.Sprintf("action (%s, now %s)", text(string(c.Before.Action)), text(string(c.After.Action)))
 				}
@@ -211,6 +214,28 @@ func RenderDiff(d Diff) []byte {
 		}
 	}
 	return []byte(b.String())
+}
+
+func mappingChange(before, after *UserMapping) string {
+	if before == nil {
+		return "user mapping added"
+	}
+	if after == nil {
+		return "user mapping removed"
+	}
+	var changes []string
+	for _, field := range []struct{ name, old, new string }{
+		{"login email", before.Email, after.Email},
+		{"PagerDuty role", before.Role, after.Role},
+		{"decision", before.Decision, after.Decision},
+		{"account ID", before.AccountID, after.AccountID},
+		{"site access", before.SiteAccess, after.SiteAccess},
+	} {
+		if field.old != field.new {
+			changes = append(changes, fmt.Sprintf("%s (%s, now %s)", field.name, text(fmt.Sprintf("%q", field.old)), text(fmt.Sprintf("%q", field.new))))
+		}
+	}
+	return strings.Join(changes, ", ")
 }
 
 // RenderConfirmation returns confirmation.md, with the text of each accepted

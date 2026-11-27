@@ -89,11 +89,11 @@ func healthyAPIs() httpx.Config {
 		[]any{map[string]any{"id": "org-1", "type": "orgs", "attributes": map[string]any{"name": "Acme"}}})
 	site.Answer(http.MethodPost, site.AdminPath("/v2/orgs/org-1/directories/-/users/search"), http.StatusOK,
 		map[string]any{"data": []any{
-			map[string]any{"accountId": "account-of-org-1", "email": "Operator@example.com", "accountStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-1"}}},
+			map[string]any{"accountId": "account-of-org-1", "email": "Operator@example.com", "accountStatus": "active", "membershipStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-1"}}},
 			map[string]any{"accountId": "inactive", "email": "inactive@example.com", "accountStatus": "inactive"},
-			map[string]any{"accountId": "amb1", "email": "ambiguous@example.com", "accountStatus": "active"},
-			map[string]any{"accountId": "amb2", "email": "ambiguous@example.com", "accountStatus": "active"},
-			map[string]any{"accountId": "other-site", "email": "other-site@example.com", "accountStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-2"}}},
+			map[string]any{"accountId": "amb1", "email": "ambiguous@example.com", "accountStatus": "active", "membershipStatus": "active"},
+			map[string]any{"accountId": "amb2", "email": "ambiguous@example.com", "accountStatus": "active", "membershipStatus": "active"},
+			map[string]any{"accountId": "other-site", "email": "other-site@example.com", "accountStatus": "active", "membershipStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-2"}}},
 		}})
 
 	if os.Getenv("JSM_OPS_MIGRATOR_TEST_DIRECTORY_DENIED") == "1" {
@@ -141,7 +141,7 @@ func TestTheSiteChoosesTheAtlassianAPIHost(t *testing.T) {
 		base := site.Config()
 		// The base says the opposite, so only the site can choose the host.
 		base.Staging = !tc.staging
-		clients, err := apiClients(base)(&cli.Env{Config: cli.Config{Site: tc.site}}, base.Credentials)
+		clients, err := (&commandHTTP{base: base}).apiClients(&cli.Env{Config: cli.Config{Site: tc.site}}, base.Credentials)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,4 +176,36 @@ func TestScripts(t *testing.T) {
 			return nil
 		},
 	})
+}
+
+func TestCommandHTTPReusesLimitsOnlyForTheSameConnection(t *testing.T) {
+	cache := &commandHTTP{}
+	env := &cli.Env{Config: cli.Config{Site: "acme.atlassian.net"}}
+	creds := credentials.Set{}.With(credentials.PagerDutyKey, "first-test-key")
+	get := func() *httpx.Client {
+		t.Helper()
+		h, err := cache.get(env, creds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	first := get()
+	if get() != first {
+		t.Fatal("preflight and steps cannot share the limiter")
+	}
+	creds = creds.With(credentials.PagerDutyKey, "second-test-key")
+	second := get()
+	if second == first {
+		t.Fatal("reused old credentials")
+	}
+	env.Config.PagerDutyRegion = "eu"
+	third := get()
+	if third == second {
+		t.Fatal("reused old region")
+	}
+	env.Config.Site = "acme.jira-dev.com"
+	if get() == third {
+		t.Fatal("reused old staging configuration")
+	}
 }
