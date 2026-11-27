@@ -39,12 +39,12 @@ func TestImportReviewedMappings(t *testing.T) {
 	}
 	reviewed := func(t *testing.T) [][]string {
 		rows := parse(t)
-		rows[1][9], rows[2][9] = "  AcCePt ", "defer"
+		rows[2][7], rows[3][7] = "  AcCePt ", "defer"
 		return rows
 	}
 	rows := reviewed(t)
-	rows[1], rows[2] = rows[2], rows[1]
-	rows[1][9] = "skip"
+	rows[2], rows[3] = rows[3], rows[2]
+	rows[2][7] = "skip"
 	got, err := check(t, rows)
 	want := []MappingDecision{{"P1", "accept", "account"}, {"P2", "skip", ""}}
 	if err != nil || !slices.Equal(got, want) {
@@ -67,18 +67,22 @@ func TestImportReviewedMappings(t *testing.T) {
 		name string
 		edit func([][]string) [][]string
 	}{
-		{"missing row", func(r [][]string) [][]string { return r[:2] }},
-		{"duplicate row", func(r [][]string) [][]string { return append(r, r[1]) }},
-		{"unknown ID", func(r [][]string) [][]string { r[1][0] = "other"; return r }},
-		{"changed account", func(r [][]string) [][]string { r[1][3] = "other"; return r }},
-		{"wrong version", func(r [][]string) [][]string { r[1][7] = "2"; return r }},
-		{"wrong hash", func(r [][]string) [][]string { r[1][8] = "other"; return r }},
-		{"missing decision", func(r [][]string) [][]string { r[1] = r[1][:9]; return r }},
-		{"blank decision", func(r [][]string) [][]string { r[2][9] = ""; return r }},
-		{"one placeholder left", func(r [][]string) [][]string { r[2][9] = parse(t)[2][9]; return r }},
-		{"invalid decision", func(r [][]string) [][]string { r[1][9] = "approve"; return r }},
-		{"accepted ambiguity", func(r [][]string) [][]string { r[2][9] = "accept"; return r }},
-		{"old header", func(r [][]string) [][]string { r[0] = r[0][:7]; return r }},
+		{"missing metadata", func(r [][]string) [][]string { return r[1:] }},
+		{"duplicate metadata", func(r [][]string) [][]string { return append(r, r[0]) }},
+		{"unknown metadata", func(r [][]string) [][]string { r[0][0] = "other"; return r }},
+		{"missing hash", func(r [][]string) [][]string { r[0][1] = ""; return r }},
+		{"wrong hash", func(r [][]string) [][]string { r[0][1] = "other"; return r }},
+		{"extra metadata", func(r [][]string) [][]string { r[0][2] = "other"; return r }},
+		{"changed header", func(r [][]string) [][]string { r[1][0] = "other"; return r }},
+		{"missing row", func(r [][]string) [][]string { return r[:3] }},
+		{"duplicate row", func(r [][]string) [][]string { return append(r, r[2]) }},
+		{"unknown ID", func(r [][]string) [][]string { r[2][0] = "other"; return r }},
+		{"changed account", func(r [][]string) [][]string { r[2][3] = "other"; return r }},
+		{"missing decision", func(r [][]string) [][]string { r[2] = r[2][:7]; return r }},
+		{"blank decision", func(r [][]string) [][]string { r[3][7] = ""; return r }},
+		{"one placeholder left", func(r [][]string) [][]string { r[3][7] = parse(t)[3][7]; return r }},
+		{"invalid decision", func(r [][]string) [][]string { r[2][7] = "approve"; return r }},
+		{"accepted ambiguity", func(r [][]string) [][]string { r[3][7] = "accept"; return r }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got, err := check(t, tc.edit(reviewed(t))); err == nil || got != nil {

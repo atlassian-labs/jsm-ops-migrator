@@ -364,7 +364,7 @@ func ContentHash(p Plan) (string, error) {
 	var mappingFormat int
 	var columns []string
 	if n.HasUserMappings() {
-		mappingFormat = 2 // The previous template used blank decision cells.
+		mappingFormat = 3 // The plan identifier is now a file-level metadata record.
 		columns = mappingColumns
 	}
 	data, err := encodeJSON(struct {
