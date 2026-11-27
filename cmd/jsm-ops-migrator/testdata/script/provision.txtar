@@ -10,12 +10,12 @@ env JSM_OPS_MIGRATOR_JSM_PLAN=standard
 env W=$WORK/home/jsm-ops-migrator/artifacts
 exec jsm-ops-migrator login --site acme --org-id org-1
 exec jsm-ops-migrator plan --user-provisioning scim
-grep 'P2,missing@example.com,user,,,identity_provider' $W/plans/v1/mapping.csv
+grep 'P2,missing@example.com,user,,,identity_provider,.*,Replace with defer / skip$' $W/plans/v1/mapping.csv
 ! grep '"action": "create"' $W/plans/v1/plan.json
 
 env JSM_OPS_MIGRATOR_USER_PROVISIONING=non-scim
 exec jsm-ops-migrator plan
-grep 'P2,missing@example.com,user,,,propose_invite' $W/plans/v2/mapping.csv
+grep 'P2,missing@example.com,user,,,propose_invite,.*,Replace with accept / defer / skip$' $W/plans/v2/mapping.csv
 grep 'Up to 2 JSM agent seats' $W/plans/v2/risk-queue.md
 cp $W/plans/v2/mapping.csv reviewed.csv
 review-all reviewed.csv defer P2

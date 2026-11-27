@@ -111,7 +111,7 @@ func (e *Engine) checkMappingApproval(ctx context.Context, v *PlanVersion) error
 	}
 	if a == nil {
 		if v.LegacyMappingExport {
-			return messages.AwaitingInput(errors.New("run plan again to export a CSV with blank review decisions"))
+			return messages.AwaitingInput(errors.New("run plan again to export a CSV with a review_decision field for each user"))
 		}
 		return messages.AwaitingInput(fmt.Errorf("plan v%d needs reviewed user mappings: run plan approve-mappings --version %d --csv <reviewed.csv>", v.Version, v.Version))
 	}
