@@ -15,6 +15,8 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/discover"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/admin"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/jira"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/ops"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/pd"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
@@ -22,9 +24,13 @@ import (
 )
 
 type Step struct {
-	PD             *pd.Client
-	Admin          *admin.Client
-	OrgID, CloudID string
+	PD                  *pd.Client
+	Admin               *admin.Client
+	OrgID, CloudID      string
+	Jira                *jira.Client
+	Ops                 *ops.Client
+	Provisioning        string
+	IncludeStakeholders map[string]bool
 }
 
 func (Step) Name() string { return "users" }
@@ -40,17 +46,21 @@ type user struct {
 	EmailWithheld bool   `json:"email_withheld,omitempty"`
 }
 
-func (u user) exclusion() (string, string) {
+func (u user) stakeholder() bool {
+	return u.Role == "read_only_user" || u.Role == "read_only_limited_user"
+}
+
+func (u user) exclusion(includeStakeholder bool) (string, string) {
 	switch {
 	case u.Pending == nil:
 		return "review", "PagerDuty did not report the invitation state."
 	case *u.Pending:
 		return "exclude_pending", "PagerDuty invitation is pending."
-	case u.Role == "read_only_user" || u.Role == "read_only_limited_user":
+	case u.stakeholder() && !includeStakeholder:
 		return "exclude_stakeholder", "Stakeholders are excluded by default."
 	}
 	switch u.Role {
-	case "admin", "limited_user", "observer", "owner", "restricted_access", "user":
+	case "admin", "limited_user", "observer", "owner", "restricted_access", "user", "read_only_user", "read_only_limited_user":
 	default:
 		return "review", "Unrecognized PagerDuty role."
 	}
@@ -173,10 +183,19 @@ func (s Step) Read(ctx context.Context, side review.Side, w *discover.Writer) er
 	if err != nil {
 		return err
 	}
+	if s.Provisioning == "non-scim" {
+		seats, err := s.Jira.Seats(ctx)
+		if err != nil {
+			return fmt.Errorf("reading JSM seats: %v", err)
+		}
+		if err := w.Put("capacity", "jsm", seats); err != nil {
+			return err
+		}
+	}
 	var eligible []user
 	var emails []credentials.Sensitive
 	for _, u := range users {
-		if action, _ := u.exclusion(); action != "" {
+		if action, _ := u.exclusion(s.IncludeStakeholders[u.ID]); action != "" {
 			continue
 		}
 		eligible = append(eligible, u)
@@ -223,7 +242,7 @@ func (s Step) Plan(ctx context.Context, in run.PlanInput) (run.Planned, error) {
 	for _, u := range users {
 		m := &review.UserMapping{Email: u.Email, Role: u.Role}
 		it := review.Item{Key: "users/" + u.ID, Action: review.Manual, PagerDuty: &review.Ref{Type: "user", ID: u.ID}, UserMapping: m}
-		m.Decision, it.Summary = u.exclusion()
+		m.Decision, it.Summary = u.exclusion(s.IncludeStakeholders[u.ID])
 		if strings.HasPrefix(m.Decision, "exclude_") {
 			it.Action = review.Skip
 		}
@@ -247,15 +266,27 @@ func (s Step) Plan(ctx context.Context, in run.PlanInput) (run.Planned, error) {
 				}
 			}
 		}
+		if s.Provisioning != "" {
+			if err := s.planAccess(&plan, &it); err != nil {
+				return run.Planned{}, err
+			}
+		}
+		if u.stakeholder() && s.IncludeStakeholders[u.ID] {
+			it.Summary = "Stakeholder selected for standard user access. " + it.Summary
+		}
 		plan.Items = append(plan.Items, it)
 	}
+	if s.Provisioning == "non-scim" && !directoryFailed {
+		var seats jira.Seats
+		ok, err := in.JSM.Get(ctx, "users", "capacity", "jsm", &seats)
+		if err != nil {
+			return run.Planned{}, err
+		}
+		if !ok {
+			plan.Messages = append(plan.Messages, messages.Message{Class: messages.Blocker, Code: "seat_read_required", Text: "Refresh the JSM read for non-SCIM provisioning."})
+		} else {
+			plan.Messages = append(plan.Messages, capacityMessage(plan.Items, seats))
+		}
+	}
 	return plan, nil
-}
-
-// These proposals never plan a remote write or record an approved mapping.
-func (Step) Apply(context.Context, review.Item, run.Results) (run.Outcome, error) {
-	return run.Outcome{}, errors.New("identity proposals are review-only")
-}
-func (Step) Lookup(context.Context, review.Item, run.Results, *discover.Snapshot) (run.Lookup, error) {
-	return run.Lookup{}, errors.New("identity proposals are review-only")
 }

@@ -80,6 +80,9 @@ func RenderPlan(p Plan) []byte {
 		b.WriteString("None.\n")
 		return []byte(b.String())
 	}
+	if p.HasUserMappings() {
+		b.WriteString("Only approved access calls are executed. A `verify` item links the user after their Operations account is ready.\n\n")
+	}
 	b.WriteString("`create` and `update` make a call. `map` records the link to an object that is already in JSM, " +
 		"and `skip` and `manual` are reported: none of these three makes a call.\n\n")
 	for i, it := range p.Items {

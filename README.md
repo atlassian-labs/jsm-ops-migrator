@@ -47,9 +47,29 @@ cp "$WORKSPACE/artifacts/plans/v1/mapping.csv" reviewed.csv
 jsm-ops-migrator plan approve-mappings --workspace "$WORKSPACE" --version 1 --csv reviewed.csv
 ```
 
-Use the version printed by `plan`. Fill in every `review_decision` cell. Use UTF-8 CSV with a comma or semicolon separator. Set the decision to `accept` for an eligible proposed account, `defer` to leave a user unresolved, or `skip` to exclude them. Keep every row and leave the other columns intact. An active organization admin must approve with their own Atlassian API token. The CLI checks the token owner's account ID and directory role, then writes `mapping-approval.json` beside the plan with the approver, time, plan hash, and decisions. Before apply starts, a revised approval for the same plan keeps the previous approvers, times, and decisions in the receipt. A new plan version requires a new review.
+Use the version printed by `plan`. Fill in every `review_decision` cell. Use UTF-8 CSV with a comma or semicolon separator. Set the decision to `accept` for an eligible proposed account or invitation, `defer` to leave a user unresolved, or `skip` to exclude them. Keep every row and leave the other columns intact. An active organization admin must approve with their own Atlassian API token. The CLI checks the token owner's account ID and directory role, then writes `mapping-approval.json` beside the plan with the approver, time, plan hash, and decisions. Before apply starts, a revised approval for the same plan keeps the previous approvers, times, and decisions in the receipt. A new plan version requires a new review.
 
 A separate approver runs the approval command in the original, unlocked migration workspace with its organization API key. Supply the approver's own email and personal API token through `JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL` and `JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN` for that command. Mapping approval reads the target organization directory and Jira. For a scoped token, grant the scope for Jira's current-user endpoint (`read:jira-user`, or the documented granular scopes). [Jira current-user API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-myself/#api-rest-api-3-myself-get)
+
+### Apply approved user access
+
+Set the provisioning policy for the target before running `plan`. Omitting the setting produces a review-only plan. Use `scim` for a site managed by an identity provider. Its plan reports missing access for the identity provider to grant. Use `non-scim` only after confirming the site allows the migration to send invitations. The CLI takes this policy from the operator.
+
+```sh
+export JSM_OPS_MIGRATOR_USER_PROVISIONING=non-scim
+jsm-ops-migrator plan --workspace "$WORKSPACE"
+# Set VERSION to the new plan version printed above.
+cp "$WORKSPACE/artifacts/plans/v$VERSION/mapping.csv" reviewed.csv
+# Fill in review_decision for every row, then approve with the named admin.
+jsm-ops-migrator plan approve-mappings --workspace "$WORKSPACE" --version "$VERSION" --csv reviewed.csv
+# Fill in the acceptance file if the plan lists warnings.
+jsm-ops-migrator apply --workspace "$WORKSPACE" --accept-file "$WORKSPACE/artifacts/plans/v$VERSION/acceptance-template.yaml"
+jsm-ops-migrator resume --workspace "$WORKSPACE"
+```
+
+Accepting `propose_invite` authorizes an emailed invitation to the exact login. The address may belong to an account outside the organization. Accepting `propose_access` authorizes the JSM product grant to the named account. Organization invitations require a paid subscription. Each new grant can consume one agent seat. To include individual PagerDuty stakeholders as standard JSM users, pass their IDs to `plan --include-stakeholders P1,P2` and review their seat cost. [Organization invitations API](https://developer.atlassian.com/cloud/admin/organization/rest/api-group-users/)
+
+Before sending invitations, the CLI verifies the target organization and site, rereads the approved identities, and checks remaining seats. The run records the account ID returned for each invitation. Users awaiting acceptance or Operations provisioning appear in the run report. Resume checks readiness and releases dependent work when the Operations account exists. Only ready users appear in the run's mapping CSV. An active JSM user who never becomes ready can still consume a seat.
 
 Use `resume` to reconcile a journaled create by looking up its JSM object. Independent items can continue while dependent items wait. If you verify in JSM that no object was made, wait ten minutes from the recorded attempt and run `resume --skip-create <item-key>`. Repeat `--skip-create` for each verified item in the same run. A fresh lookup must also find no match for each skip. The run leaves skipped creates for a new plan and approval. When JSM has acknowledged a create, resume needs to identify its object.
 

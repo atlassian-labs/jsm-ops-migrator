@@ -25,10 +25,12 @@ const envPrefix = "JSM_OPS_MIGRATOR"
 // A task that needs another setting adds the field here, with its key in
 // configKeys, in the same change.
 type Config struct {
-	Site               string `mapstructure:"site" yaml:"site,omitempty"`
-	CloudID            string `mapstructure:"cloud_id" yaml:"cloud_id,omitempty"`
-	OrgID              string `mapstructure:"org_id" yaml:"org_id,omitempty"`
-	PagerDutySubdomain string `mapstructure:"pagerduty_subdomain" yaml:"pagerduty_subdomain,omitempty"`
+	IncludeStakeholders string `mapstructure:"include_stakeholders" yaml:"include_stakeholders,omitempty"`
+	UserProvisioning    string `mapstructure:"user_provisioning" yaml:"user_provisioning,omitempty"`
+	Site                string `mapstructure:"site" yaml:"site,omitempty"`
+	CloudID             string `mapstructure:"cloud_id" yaml:"cloud_id,omitempty"`
+	OrgID               string `mapstructure:"org_id" yaml:"org_id,omitempty"`
+	PagerDutySubdomain  string `mapstructure:"pagerduty_subdomain" yaml:"pagerduty_subdomain,omitempty"`
 	// PagerDutyRegion is where the PagerDuty account is hosted, us or eu. A
 	// key works only in its account's region; login finds it and saves it
 	// with the key.
@@ -42,6 +44,8 @@ type configKey struct{ key, flag, usage string }
 
 // configKeys bind each setting to JSM_OPS_MIGRATOR_<KEY> and to a flag.
 var configKeys = []configKey{
+	{"include_stakeholders", "include-stakeholders", "comma-separated PagerDuty stakeholder IDs to review for standard JSM user access"},
+	{"user_provisioning", "user-provisioning", "identity provisioning policy: non-scim or scim (default: review only)"},
 	{"site", "site", "Atlassian site, for example acme.atlassian.net (overrides the workspace config)"},
 	{"cloud_id", "cloud-id", "cloudId of the site (overrides the workspace config)"},
 	{"org_id", "org-id", "Atlassian organization ID (overrides the workspace config)"},
@@ -84,6 +88,11 @@ func loadConfig(ws *store.Workspace, flags *pflag.FlagSet) (Config, error) {
 	var c Config
 	if err := v.UnmarshalExact(&c); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", ws.ConfigPath(), err)
+	}
+	switch c.UserProvisioning {
+	case "", "non-scim", "scim":
+	default:
+		return Config{}, errors.New("user-provisioning must be non-scim or scim")
 	}
 	return c, nil
 }

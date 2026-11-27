@@ -8,6 +8,18 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 )
 
+// An unfinished verification is safe to repeat. Only a write can have an
+// unknown side effect while its journal row is in flight.
+func entryState(action review.Action, state review.EntryState) review.EntryState {
+	if state != sending {
+		return state
+	}
+	if action == review.Verify {
+		return review.Pending
+	}
+	return review.Unknown
+}
+
 // record rebuilds the run record from the journal: one entry per plan item,
 // in the plan's order, with the state of its latest row. A row still sending
 // is unknown in the record, because the call may have reached JSM; an item
@@ -29,10 +41,7 @@ func (e *Engine) record(ctx context.Context, info RunInfo, p review.Plan) (revie
 	for i, it := range p.Items {
 		entry := review.Entry{Key: it.Key, Action: it.Action, State: review.Pending, PagerDuty: it.PagerDuty, JSM: it.JSM}
 		if row, ok := j.latest[it.Key]; ok {
-			entry.State, entry.Attempts = row.state, j.attempts[it.Key]
-			if row.state == sending {
-				entry.State = review.Unknown
-			}
+			entry.State, entry.Attempts = entryState(it.Action, row.state), j.attempts[it.Key]
 			entry.Status, entry.RequestID, entry.Messages = row.status, row.requestID, row.msgs
 			if row.jsm != nil {
 				entry.JSM = row.jsm

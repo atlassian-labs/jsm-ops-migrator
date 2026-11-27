@@ -102,7 +102,11 @@ func (e *Engine) Resume(ctx context.Context, skipCreates ...string) (RunResult, 
 	if err != nil {
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
-	skips, err := checkSkipCreates(r.Version.Plan, j, skipCreates, e.now())
+	p, err := e.approvedPlan(ctx, r.Version, j)
+	if err != nil {
+		return RunResult{}, err
+	}
+	skips, err := checkSkipCreates(p, j, skipCreates, e.now())
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -114,7 +118,7 @@ func (e *Engine) Resume(ctx context.Context, skipCreates ...string) (RunResult, 
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
 	info.State = review.Running
-	x := newExecutor(e, &info, r.Version.Plan, jsm, j)
+	x := newExecutor(e, &info, p, jsm, j)
 	x.skipCreates = skips
 	if _, err := x.writeRecord(ctx, info); err != nil {
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)

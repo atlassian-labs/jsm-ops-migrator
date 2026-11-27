@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -114,6 +115,7 @@ func healthyAPIs() httpx.Config {
 			jsmfake.Fault{Status: http.StatusForbidden})
 	}
 
+	configureAccessFake(site)
 	base := account.Config("")
 	base.Transport = byHost{pagerDuty: account.Transport(), atlassian: site.Transport()}
 	return base
@@ -184,13 +186,16 @@ func TestScripts(t *testing.T) {
 		Dir: "testdata/script",
 		Cmds: map[string]func(*testscript.TestScript, bool, []string){
 			"review-all": func(ts *testscript.TestScript, neg bool, args []string) {
-				if neg || len(args) != 2 {
-					ts.Fatalf("usage: review-all file decision")
+				if neg || len(args) < 2 {
+					ts.Fatalf("usage: review-all file default-decision [accepted-user-id ...]")
 				}
 				rows, err := csv.NewReader(strings.NewReader(ts.ReadFile(args[0]))).ReadAll()
 				ts.Check(err)
 				for _, row := range rows[1:] {
 					row[len(row)-1] = args[1]
+					if slices.Contains(args[2:], row[0]) {
+						row[len(row)-1] = "accept"
+					}
 				}
 				var b bytes.Buffer
 				ts.Check(csv.NewWriter(&b).WriteAll(rows))

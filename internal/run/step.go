@@ -70,6 +70,8 @@ type Planned struct {
 
 // Outcome is what Apply did.
 type Outcome struct {
+	// Pending leaves a read-only verification for a later resume.
+	Pending bool
 	// Declined means the step made no call, because of what an item it
 	// depends on gave. The zero Outcome is a call that was made.
 	Declined bool

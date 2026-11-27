@@ -142,6 +142,9 @@ func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error)
 		switch d.Decision {
 		case "accept":
 			m := s.item.UserMapping
+			if m.Decision == "propose_invite" && m.AccountID == "" && s.item.Action == Verify {
+				break
+			}
 			if (m.Decision != "map_existing" && m.Decision != "propose_access") || m.AccountID == "" {
 				return nil, fmt.Errorf("record %d has no eligible proposed mapping to accept", n)
 			}

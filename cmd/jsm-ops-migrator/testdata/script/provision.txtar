@@ -1,0 +1,47 @@
+# Separate processes read the same workspace through plan, approval, apply, and resume.
+env HOME=$WORK/home
+env USERPROFILE=$WORK/home
+env JSM_OPS_MIGRATOR_TEST_APIS=healthy
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+env JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=operator@example.com
+env JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN=atl-canary-0123456789
+env JSM_OPS_MIGRATOR_ORG_API_KEY=org-canary-0123456789
+env JSM_OPS_MIGRATOR_JSM_PLAN=standard
+env W=$WORK/home/jsm-ops-migrator/artifacts
+exec jsm-ops-migrator login --site acme --org-id org-1
+exec jsm-ops-migrator plan --user-provisioning scim
+grep 'P2,missing@example.com,user,,,identity_provider' $W/plans/v1/mapping.csv
+! grep '"action": "create"' $W/plans/v1/plan.json
+
+env JSM_OPS_MIGRATOR_USER_PROVISIONING=non-scim
+exec jsm-ops-migrator plan
+grep 'P2,missing@example.com,user,,,propose_invite' $W/plans/v2/mapping.csv
+grep 'Up to 2 JSM agent seats' $W/plans/v2/risk-queue.md
+cp $W/plans/v2/mapping.csv reviewed.csv
+review-all reviewed.csv defer P2
+exec jsm-ops-migrator plan approve-mappings --version 2 --csv reviewed.csv
+env TEST_JSM_SEATS=0
+! exec jsm-ops-migrator apply --accept-file $W/plans/v2/acceptance-template.yaml
+stderr 'approved invitations need 1 JSM agent seats, but only 0 remain'
+! exists $W/runs
+! exec jsm-ops-migrator apply --user-provisioning scim --accept-file $W/plans/v2/acceptance-template.yaml
+stderr 'require --user-provisioning non-scim'
+! exists $W/runs
+
+env TEST_JSM_SEATS=1
+env TEST_ACCESS_PHASE=invite
+! exec jsm-ops-migrator apply --accept-file $W/plans/v2/acceptance-template.yaml --output json
+stdout '"state": "interrupted"'
+stdout '"pending": 1'
+stdout 'invitation_pending'
+env TEST_ACCESS_PHASE=ready
+env TEST_JSM_SEATS=0
+exec jsm-ops-migrator resume --output json
+stdout '"state": "completed"'
+exec jsm-ops-migrator resume
+stdout 'no run is unfinished'
+
+# The operator may opt an individual stakeholder in as a regular user on a fresh plan.
+exec jsm-ops-migrator plan --include-stakeholders P4
+grep 'P4,stakeholder@example.com,read_only_limited_user,,,propose_invite' $W/plans/v3/mapping.csv
+grep 'Up to 3 JSM agent seats' $W/plans/v3/risk-queue.md

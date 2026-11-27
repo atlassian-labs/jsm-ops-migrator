@@ -33,10 +33,12 @@ const (
 	Skip Action = "skip"
 	// Manual is done by the operator by hand; the item's messages say how.
 	Manual Action = "manual"
+	// Verify checks readiness without changing the target. Resume repeats the read.
+	Verify Action = "verify"
 )
 
 // Actions are every action, in the order reports list them.
-var Actions = []Action{Create, Update, Map, Skip, Manual}
+var Actions = []Action{Create, Update, Map, Skip, Manual, Verify}
 
 // Known reports whether a is one of the actions.
 func (a Action) Known() bool {
@@ -49,7 +51,7 @@ func (a Action) Known() bool {
 }
 
 // Calls reports whether apply makes a call for an item with this action.
-func (a Action) Calls() bool { return a == Create || a == Update }
+func (a Action) Calls() bool { return a == Create || a == Update || a == Verify }
 
 // Ref names an object in PagerDuty or JSM.
 type Ref struct {
@@ -80,6 +82,8 @@ type Item struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 	// UserMapping is a proposal for the admin, independent of executed mappings.
 	UserMapping *UserMapping `json:"user_mapping,omitempty"`
+	// ApprovalFor binds a conditional call to the PagerDuty user in the reviewed CSV.
+	ApprovalFor string `json:"approval_for,omitempty"`
 }
 
 // Step is the name of the step that planned the item.
@@ -248,7 +252,7 @@ func (it Item) check(i int, before map[string]bool) []error {
 		}
 	}
 	var rules []string
-	for _, s := range append([]string{it.Key}, it.DependsOn...) {
+	for _, s := range append([]string{it.Key, it.ApprovalFor}, it.DependsOn...) {
 		rules = append(rules, screenID(s)...)
 	}
 	for _, r := range []*Ref{it.PagerDuty, it.JSM} {
@@ -261,6 +265,9 @@ func (it Item) check(i int, before map[string]bool) []error {
 		slices.Sort(rules)
 		// The rules only, never the value, so the error cannot leak it.
 		bad("its key, a dependency or a reference holds sensitive data (%s)", strings.Join(slices.Compact(rules), ", "))
+	}
+	if it.ApprovalFor != "" && (!plainRef(it.ApprovalFor) || (it.UserMapping != nil && (it.PagerDuty == nil || it.PagerDuty.ID != it.ApprovalFor))) {
+		bad("conditional access call needs the reviewed source user ID")
 	}
 	if it.UserMapping != nil {
 		if it.PagerDuty == nil || it.PagerDuty.Type != "user" {
@@ -445,6 +452,7 @@ type StepCounts struct {
 	Map    int    `json:"map"`
 	Skip   int    `json:"skip"`
 	Manual int    `json:"manual"`
+	Verify int    `json:"verify,omitempty"`
 }
 
 // Of returns the count of one action.
@@ -460,6 +468,8 @@ func (s StepCounts) Of(a Action) int {
 		return s.Skip
 	case Manual:
 		return s.Manual
+	case Verify:
+		return s.Verify
 	}
 	return 0
 }
@@ -488,6 +498,8 @@ func Summarize(p Plan) Summary {
 			c.Skip++
 		case Manual:
 			c.Manual++
+		case Verify:
+			c.Verify++
 		}
 		if it.Action.Calls() {
 			s.Calls++

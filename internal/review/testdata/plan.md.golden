@@ -11,10 +11,10 @@ Built from these reads:
 
 ## By step
 
-| Step | create | update | map | skip | manual |
-|---|---:|---:|---:|---:|---:|
-| users | 1 | 0 | 1 | 1 | 0 |
-| teams | 1 | 0 | 0 | 0 | 1 |
+| Step | create | update | map | skip | manual | verify |
+|---|---:|---:|---:|---:|---:|---:|
+| users | 1 | 0 | 1 | 1 | 0 | 0 |
+| teams | 1 | 0 | 0 | 0 | 1 | 0 |
 
 ## Items in the order apply takes them
 
