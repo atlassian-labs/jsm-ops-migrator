@@ -26,7 +26,7 @@ exists $W/plans/v1/diff.md
 exists $W/plans/v1/risk-queue.md
 exists $W/plans/v1/acceptance-template.yaml
 grep 'P1,operator@example.com,admin,account-of-org-1,yes,map_existing' $W/plans/v1/mapping.csv
-grep 'P2,missing@example.com,user,,,review_directory_miss' $W/plans/v1/mapping.csv
+grep 'P2,missing@example[.]com,user,,,review_directory_miss,No user in your Atlassian organization’s directory matched this PagerDuty email[.] Choose defer while you confirm the person’s Atlassian login email[.],' $W/plans/v1/mapping.csv
 grep 'P3,pending@example.com,user,,,exclude_pending' $W/plans/v1/mapping.csv
 grep 'P4,stakeholder@example.com,read_only_limited_user,,,exclude_stakeholder' $W/plans/v1/mapping.csv
 grep 'P5,inactive@example.com,user,,,review_inactive' $W/plans/v1/mapping.csv
