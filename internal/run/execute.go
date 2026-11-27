@@ -125,7 +125,7 @@ type executor struct {
 	// that is resumed.
 	latest map[string]journalRow
 	// skipCreates are operator-confirmed omissions for journaled items.
-	skipCreates map[string]bool
+	skipCreates, skipVerifies map[string]bool
 	// taken and total count each step's items: taken those with a final
 	// state.
 	taken, total map[string]int
@@ -249,9 +249,19 @@ func (x *executor) verify(ctx, db context.Context, it review.Item, row journalRo
 		x.seq++
 		row = journalRow{seq: x.seq, key: it.Key, started: x.e.now()}
 	}
-	out, err := x.e.step(it.Step()).Apply(ctx, it, x.deps(it))
+	var out Outcome
+	var err error
+	if x.skipVerifies[it.Key] {
+		out.Declined = true
+		out.Messages = []messages.Message{{Class: messages.ManualTask, Code: "verification_skipped", Text: "The operator stopped waiting for this user. Review any granted site access before planning again."}}
+	} else {
+		out, err = x.e.step(it.Step()).Apply(ctx, it, x.deps(it))
+	}
 	row.finished, row.jsm, row.msgs = x.e.now(), nil, out.Messages
 	switch {
+	case errors.Is(err, httperr.ErrForbidden), errors.Is(err, httperr.ErrUnauthorized), errors.Is(err, httperr.ErrBadResponse), errors.Is(err, httperr.ErrInvalid):
+		row.state = review.Failed
+		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "verification_failed", Text: fmt.Sprintf("Readiness check failed: %v. Correct the issue and review a fresh plan.", err)}}
 	case err != nil:
 		row.state = sending
 		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "verification_error", Text: fmt.Sprintf("Readiness check failed: %v. Resume to check again.", err)}}

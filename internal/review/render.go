@@ -2,6 +2,7 @@ package review
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,7 +81,7 @@ func RenderPlan(p Plan) []byte {
 		b.WriteString("None.\n")
 		return []byte(b.String())
 	}
-	if p.HasUserMappings() {
+	if slices.ContainsFunc(p.Items, func(it Item) bool { return it.ApprovalFor != "" }) {
 		b.WriteString("Only approved access calls are executed. A `verify` item links the user after their Operations account is ready.\n\n")
 	}
 	b.WriteString("`create` and `update` make a call. `map` records the link to an object that is already in JSM, " +

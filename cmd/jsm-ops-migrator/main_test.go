@@ -99,13 +99,17 @@ func healthyAPIs() httpx.Config {
 	site.Answer(http.MethodGet, "/ex/jira/cloud-1"+site.JiraPath("/myself"), http.StatusOK, map[string]string{"accountId": caller})
 	site.List(http.MethodGet, site.AdminPath("/v1/orgs"), "data",
 		[]any{map[string]any{"id": "org-1", "type": "orgs", "attributes": map[string]any{"name": "Acme"}}})
+	otherSiteID := "other-site"
+	if os.Getenv("TEST_ACCESS_PHASE") == "changed" {
+		otherSiteID = "replacement-account"
+	}
 	site.Answer(http.MethodPost, site.AdminPath("/v2/orgs/org-1/directories/-/users/search"), http.StatusOK,
 		map[string]any{"data": []any{
 			map[string]any{"accountId": "account-of-org-1", "email": "Operator@example.com", "accountStatus": "active", "membershipStatus": "active", "platformRoles": roles, "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-1"}}},
 			map[string]any{"accountId": "inactive", "email": "inactive@example.com", "accountStatus": "inactive"},
 			map[string]any{"accountId": "amb1", "email": "ambiguous@example.com", "accountStatus": "active", "membershipStatus": "active"},
 			map[string]any{"accountId": "amb2", "email": "ambiguous@example.com", "accountStatus": "active", "membershipStatus": "active"},
-			map[string]any{"accountId": "other-site", "email": "other-site@example.com", "accountStatus": "active", "membershipStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-2"}}},
+			map[string]any{"accountId": otherSiteID, "email": "other-site@example.com", "accountStatus": "active", "membershipStatus": "active", "productAccess": []any{map[string]string{"id": "ari:cloud:jira-servicedesk::site/cloud-2"}}},
 		}})
 
 	if os.Getenv("JSM_OPS_MIGRATOR_TEST_DIRECTORY_DENIED") == "1" {
@@ -129,7 +133,14 @@ func (b byHost) RoundTrip(r *http.Request) (*http.Response, error) {
 	if h := r.URL.Hostname(); h == "pagerduty.com" || strings.HasSuffix(h, ".pagerduty.com") {
 		return b.pagerDuty.RoundTrip(r)
 	}
-	return b.atlassian.RoundTrip(r)
+	resp, err := b.atlassian.RoundTrip(r)
+	if err == nil && strings.HasSuffix(r.URL.Path, "/users/invite") && os.Getenv("TEST_PAUSE_WORKSPACE") != "" {
+		if err := pauseAfterInvite(os.Getenv("TEST_PAUSE_WORKSPACE")); err != nil {
+			_ = resp.Body.Close()
+			return nil, err
+		}
+	}
+	return resp, err
 }
 
 // A staging site's JSM Operations and Admin calls go to the staging API

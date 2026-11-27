@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
+	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/store"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/testkit/jsmfake"
 )
 
@@ -18,7 +22,17 @@ func configureAccessFake(site *jsmfake.Fake) {
 	}
 	site.Answer(http.MethodGet, gateway+"/applicationrole/jira-servicedesk", 200, map[string]any{"key": "jira-servicedesk", "remainingSeats": seats, "hasUnlimitedSeats": false})
 	site.Answer(http.MethodPost, site.AdminPath("/v2/orgs/org-1/workspaces"), 200, map[string]any{"data": []any{map[string]any{"id": "ari:cloud:jira-servicedesk::site/cloud-1", "attributes": map[string]string{"typeKey": "jira-servicedesk"}}}})
+	site.Answer(http.MethodGet, site.OpsPath("/v1/users/contacts"), 200, map[string]any{"values": []any{}})
+	if os.Getenv("TEST_JSM_SEATS") == "denied" {
+		site.Answer(http.MethodGet, gateway+"/applicationrole/jira-servicedesk", 403, nil)
+	}
 	switch os.Getenv("TEST_ACCESS_PHASE") {
+	case "denied":
+		site.Answer(http.MethodGet, site.OpsPath("/v1/users/contacts"), 403, nil)
+	case "refused":
+		site.Answer(http.MethodPost, site.AdminPath("/v2/orgs/org-1/users/invite"), 206, map[string]any{"data": []any{map[string]any{
+			"email": "missing@example.com", "results": []any{map[string]any{"roleAssignmentResult": []any{map[string]string{"resource": "ari:cloud:jira-servicedesk::site/cloud-1", "role": "atlassian/user", "status": "ERROR", "statusReason": "ROLE_UNAVAILABLE"}}}},
+		}}})
 	case "invite":
 		site.Answer(http.MethodPost, site.AdminPath("/v2/orgs/org-1/users/invite"), 200, map[string]any{"data": []any{map[string]any{
 			"id": "invited-user", "email": "missing@example.com",
@@ -26,8 +40,24 @@ func configureAccessFake(site *jsmfake.Fake) {
 				"resource": "ari:cloud:jira-servicedesk::site/cloud-1", "role": "ari:cloud:jira-servicedesk::role/product/member", "status": "INVITED",
 			}}},
 		}}})
-	case "ready":
+	case "ready", "changed":
 		site.Answer(http.MethodGet, gateway+"/user", 200, map[string]any{"accountId": "invited-user", "applicationRoles": map[string]any{"items": []any{map[string]string{"key": "jira-servicedesk"}}}})
-		site.Answer(http.MethodGet, site.OpsPath("/v1/users/contacts"), 200, map[string]any{"values": []any{}})
 	}
+}
+
+// Request a pause while the first grant is in flight. The engine records its
+// receipt and stops before the next item, just as with a separate pause command.
+func pauseAfterInvite(dir string) error {
+	ws, err := store.OpenWorkspace(dir, false)
+	if err != nil {
+		return err
+	}
+	active, err := engine.FindActive(ws)
+	if err != nil {
+		return err
+	}
+	if active == nil {
+		return fmt.Errorf("no active run to pause after invitation")
+	}
+	return engine.RequestPause(ws, active.RunID, time.Now())
 }

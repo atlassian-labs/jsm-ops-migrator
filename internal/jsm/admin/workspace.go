@@ -3,6 +3,8 @@ package admin
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/internal/rest"
@@ -15,7 +17,7 @@ func (c *Client) CheckJSMWorkspace(ctx context.Context, orgID, cloudID string) e
 	if err != nil {
 		return err
 	}
-	body := map[string]any{"limit": 100}
+	body := map[string]any{"limit": 1000}
 	want := "ari:cloud:jira-servicedesk::site/" + cloudID
 	seen := map[string]bool{}
 	for {
@@ -38,10 +40,17 @@ func (c *Client) CheckJSMWorkspace(ctx context.Context, orgID, cloudID string) e
 		if next == "" {
 			return fmt.Errorf("the organization did not list the target JSM workspace: %w", httperr.ErrNotFound)
 		}
+		if strings.Contains(next, "?") || strings.Contains(next, "://") {
+			link, err := url.Parse(next)
+			if err != nil || link.Query().Get("cursor") == "" {
+				return fmt.Errorf("workspace next link has no usable cursor: %w", httperr.ErrBadResponse)
+			}
+			next = link.Query().Get("cursor")
+		}
 		if seen[next] {
 			return fmt.Errorf("repeated workspace cursor: %w", httperr.ErrBadResponse)
 		}
-		body["cursor"] = next
+		body = map[string]any{"cursor": next}
 		seen[next] = true
 	}
 }

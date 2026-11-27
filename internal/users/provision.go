@@ -67,7 +67,11 @@ func capacityMessage(items []review.Item, seats jira.Seats) messages.Message {
 	if !seats.Unlimited {
 		text = fmt.Sprintf("Up to %d JSM agent seats are needed if every proposed invitation is approved. %d seats remain. Apply checks approved invitations again before writing.", n, seats.Remaining)
 	}
-	return messages.Message{Class: messages.Information, Code: "user_seats", Text: text}
+	class := messages.Information
+	if !seats.Unlimited && n > seats.Remaining {
+		class = messages.Warning
+	}
+	return messages.Message{Class: class, Code: "user_seats", Text: text}
 }
 
 func grantFrom(it review.Item) (grant, error) {
@@ -85,23 +89,28 @@ func (g grant) needsGrant(m admin.UserMatch) (bool, error) {
 		return true, nil
 	}
 	if !m.Active() || m.AccountID != g.AccountID || (m.SiteAccess != "yes" && m.SiteAccess != "no") {
-		return false, errors.New("directory identity or access differs from the reviewed proposal; review a fresh plan")
+		return false, messages.ValidationFailed(errors.New("directory identity or access differs from the reviewed proposal; review a fresh plan"))
 	}
 	return m.SiteAccess == "no", nil
 }
 
-// BeforeWrites counts only outstanding, approved access calls on this pass.
-// Resuming a previously acknowledged invitation only reads its account.
-func (s Step) BeforeWrites(ctx context.Context, items []review.Item) error {
+// BeforeWrites validates the whole approved batch before a run exists.
+func (s Step) BeforeWrites(ctx context.Context, items []review.Item, approver string) error {
 	var grants []grant
 	var emails []credentials.Sensitive
 	seen := map[string]bool{}
+	// Prefer another approved account so a self-read cannot mask missing
+	// administrator privileges. New invitations have no account ID yet.
+	probeID := approver
 	for _, it := range items {
+		if m := it.UserMapping; probeID == approver && m != nil && m.AccountID != "" && m.AccountID != approver {
+			probeID = m.AccountID
+		}
 		if it.Action != review.Create {
 			continue
 		}
 		if s.Provisioning != "non-scim" {
-			return errors.New("approved invitations require --user-provisioning non-scim on this workspace")
+			return messages.ValidationFailed(errors.New("approved invitations require --user-provisioning non-scim on this workspace"))
 		}
 		g, err := grantFrom(it)
 		if err != nil {
@@ -109,11 +118,21 @@ func (s Step) BeforeWrites(ctx context.Context, items []review.Item) error {
 		}
 		key := strings.ToLower(g.Email)
 		if seen[key] {
-			return errors.New("multiple approved invitations for the same login; review the mappings again")
+			return messages.ValidationFailed(errors.New("multiple approved invitations for the same login; review the mappings again"))
 		}
 		seen[key] = true
 		grants = append(grants, g)
 		emails = append(emails, credentials.NewSensitive(g.Email))
+	}
+	// Probe the actual read endpoints before an invitation can consume a seat.
+	// The approver supplies a known account even when all proposals are new.
+	if len(items) > 0 {
+		if _, err := s.Jira.HasAccess(ctx, probeID); err != nil {
+			return fmt.Errorf("checking Jira user access permission: %w", err)
+		}
+		if _, err := s.Ops.UserReady(ctx, probeID); err != nil {
+			return fmt.Errorf("checking Operations contacts permission: %w", err)
+		}
 	}
 	if len(grants) == 0 {
 		return nil
@@ -138,12 +157,16 @@ func (s Step) BeforeWrites(ctx context.Context, items []review.Item) error {
 	if required == 0 {
 		return nil
 	}
+	return s.checkSeats(ctx, required)
+}
+
+func (s Step) checkSeats(ctx context.Context, required int) error {
 	seats, err := s.Jira.Seats(ctx)
 	if err != nil {
 		return err
 	}
 	if !seats.Unlimited && required > seats.Remaining {
-		return fmt.Errorf("approved invitations need %d JSM agent seats, but only %d remain", required, seats.Remaining)
+		return messages.ValidationFailed(fmt.Errorf("approved invitations need %d JSM agent seats, but only %d remain", required, seats.Remaining))
 	}
 	return nil
 }
@@ -180,8 +203,19 @@ func (s Step) Apply(ctx context.Context, it review.Item, deps run.Results) (run.
 	if !need {
 		return run.Outcome{JSM: userRef(m.AccountID)}, nil
 	}
+	// A paused run may outlive its original workspace or seat check.
+	if err := s.Admin.CheckJSMWorkspace(ctx, s.OrgID, s.CloudID); err != nil {
+		return run.Outcome{}, err
+	}
+	if err := s.checkSeats(ctx, 1); err != nil {
+		return run.Outcome{}, err
+	}
 	id, receipt, err := s.Admin.Invite(ctx, s.OrgID, s.CloudID, credentials.NewSensitive(g.Email))
 	out := run.Outcome{Status: receipt.Status, RequestID: receipt.RequestID}
+	if errors.Is(err, admin.ErrInviteRejected) {
+		// A 2xx envelope containing a refused role is not a create acknowledgment.
+		out.Status = 0
+	}
 	if err != nil {
 		return out, err
 	}
@@ -239,7 +273,7 @@ func (s Step) verify(ctx context.Context, it review.Item, deps run.Results) (run
 	if !access {
 		return waiting("invitation_pending", "Jira access is pending. Ask the user to accept their invitation, then resume."), nil
 	}
-	ready, err := s.Ops.WaitForUser(ctx, id)
+	ready, err := s.Ops.UserReady(ctx, id)
 	if err != nil {
 		return run.Outcome{}, err
 	}

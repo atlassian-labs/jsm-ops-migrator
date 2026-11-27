@@ -183,15 +183,6 @@ func (s Step) Read(ctx context.Context, side review.Side, w *discover.Writer) er
 	if err != nil {
 		return err
 	}
-	if s.Provisioning == "non-scim" {
-		seats, err := s.Jira.Seats(ctx)
-		if err != nil {
-			return fmt.Errorf("reading JSM seats: %v", err)
-		}
-		if err := w.Put("capacity", "jsm", seats); err != nil {
-			return err
-		}
-	}
 	var eligible []user
 	var emails []credentials.Sensitive
 	for _, u := range users {
@@ -209,6 +200,13 @@ func (s Step) Read(ctx context.Context, side review.Side, w *discover.Writer) er
 		if err := w.Put("lookup", u.ID, lookup{u.Email, matches[i]}); err != nil {
 			return err
 		}
+	}
+	if s.Provisioning == "non-scim" {
+		seats, err := s.Jira.Seats(ctx)
+		if err != nil {
+			return w.Put("capacity_error", "jsm", messages.Clean(err.Error()))
+		}
+		return w.Put("capacity", "jsm", seats)
 	}
 	return nil
 }
@@ -239,6 +237,7 @@ func (s Step) Plan(ctx context.Context, in run.PlanInput) (run.Planned, error) {
 	}
 	directoryFailed := slices.ContainsFunc(in.JSM.Problems(), func(m messages.Message) bool { return m.Code == "users_jsm_read" && m.Class == messages.Blocker })
 	var plan run.Planned
+	selected := make(map[string]bool)
 	for _, u := range users {
 		m := &review.UserMapping{Email: u.Email, Role: u.Role}
 		it := review.Item{Key: "users/" + u.ID, Action: review.Manual, PagerDuty: &review.Ref{Type: "user", ID: u.ID}, UserMapping: m}
@@ -272,9 +271,20 @@ func (s Step) Plan(ctx context.Context, in run.PlanInput) (run.Planned, error) {
 			}
 		}
 		if u.stakeholder() && s.IncludeStakeholders[u.ID] {
+			selected[u.ID] = true
 			it.Summary = "Stakeholder selected for standard user access. " + it.Summary
 		}
 		plan.Items = append(plan.Items, it)
+	}
+	var unmatched []string
+	for id := range s.IncludeStakeholders {
+		if !selected[id] {
+			unmatched = append(unmatched, review.Quote(id))
+		}
+	}
+	if len(unmatched) > 0 {
+		slices.Sort(unmatched)
+		plan.Messages = append(plan.Messages, messages.Message{Class: messages.Warning, Code: "stakeholder_not_found", Text: "These selected IDs did not match a PagerDuty stakeholder: " + strings.Join(unmatched, ", ")})
 	}
 	if s.Provisioning == "non-scim" && !directoryFailed {
 		var seats jira.Seats
@@ -283,7 +293,15 @@ func (s Step) Plan(ctx context.Context, in run.PlanInput) (run.Planned, error) {
 			return run.Planned{}, err
 		}
 		if !ok {
-			plan.Messages = append(plan.Messages, messages.Message{Class: messages.Blocker, Code: "seat_read_required", Text: "Refresh the JSM read for non-SCIM provisioning."})
+			var why string
+			if _, err := in.JSM.Get(ctx, "users", "capacity_error", "jsm", &why); err != nil {
+				return run.Planned{}, err
+			}
+			text := "Refresh the JSM read for non-SCIM provisioning."
+			if why != "" {
+				text = "Reading JSM agent seats failed. Check the Jira administrator permission and token scope. " + why
+			}
+			plan.Messages = append(plan.Messages, messages.Message{Class: messages.Blocker, Code: "seat_read_required", Text: text})
 		} else {
 			plan.Messages = append(plan.Messages, capacityMessage(plan.Items, seats))
 		}

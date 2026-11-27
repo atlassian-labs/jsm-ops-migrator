@@ -199,7 +199,7 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 	if err != nil {
 		return RunResult{}, err
 	}
-	p, err := e.approvedPlan(ctx, v, journal{})
+	p, err := e.approvedPlan(ctx, v, true)
 	if err != nil {
 		return RunResult{}, err
 	}

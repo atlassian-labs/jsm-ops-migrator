@@ -10,7 +10,11 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/credentials"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/internal/rest"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 )
+
+// ErrInviteRejected means the response explicitly refused the requested role.
+var ErrInviteRejected = errors.New("the invitation did not grant the requested JSM role")
 
 // Invite one reviewed login per journal entry so a partial response never
 // attributes another user's access grant to this source identity.
@@ -44,10 +48,17 @@ func (c *Client) Invite(ctx context.Context, orgID, cloudID string, email creden
 	case err != nil:
 		return "", res, err
 	}
-	if res.Status != 200 || len(reply.Data) != 1 || !strings.EqualFold(reply.Data[0].Email, email.Value()) || rest.CheckSegment("account ID", reply.Data[0].ID) != nil {
+	if (res.Status != 200 && res.Status != 206) || len(reply.Data) != 1 || !strings.EqualFold(reply.Data[0].Email, email.Value()) {
 		return "", res, fmt.Errorf("invitation did not confirm one account for the reviewed email: %w", httperr.ErrUnknownOutcome)
 	}
-	if !confirmsInvitation(reply.Data[0].Results, resource) {
+	status, reason := invitationStatus(reply.Data[0].Results, resource)
+	if status == "ERROR" {
+		if reason == "" {
+			return "", res, ErrInviteRejected
+		}
+		return "", res, fmt.Errorf("%w: %s", ErrInviteRejected, messages.Clean(reason))
+	}
+	if status != "INVITED" || res.Status != 200 || rest.CheckSegment("account ID", reply.Data[0].ID) != nil {
 		return "", res, fmt.Errorf("invitation did not confirm the requested JSM role on the target site: %w", httperr.ErrUnknownOutcome)
 	}
 	return reply.Data[0].ID, res, nil
@@ -55,24 +66,26 @@ func (c *Client) Invite(ctx context.Context, orgID, cloudID string, email creden
 
 // The API returns one assignment result for our one requested role. Both the
 // single-result object and the documented one-element list identify that role.
-func confirmsInvitation(raw json.RawMessage, resource string) bool {
+func invitationStatus(raw json.RawMessage, resource string) (string, string) {
 	type result struct {
-		RoleAssignmentResult []struct{ Resource, Role, Status string }
+		RoleAssignmentResult []struct{ Resource, Role, Status, StatusReason string }
 	}
 	var single result
 	if len(raw) > 0 && raw[0] == '[' {
 		var list []result
 		if json.Unmarshal(raw, &list) != nil || len(list) != 1 {
-			return false
+			return "", ""
 		}
 		single = list[0]
 	} else if json.Unmarshal(raw, &single) != nil {
-		return false
+		return "", ""
 	}
 	if len(single.RoleAssignmentResult) != 1 {
-		return false
+		return "", ""
 	}
 	a := single.RoleAssignmentResult[0]
-	return a.Resource == resource && a.Status == "INVITED" &&
-		(a.Role == "atlassian/user" || a.Role == "ari:cloud:jira-servicedesk::role/product/member")
+	if a.Resource != resource || (a.Role != "atlassian/user" && a.Role != "ari:cloud:jira-servicedesk::role/product/member") {
+		return "", ""
+	}
+	return a.Status, a.StatusReason
 }

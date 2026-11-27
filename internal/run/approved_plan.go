@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/review"
 )
 
 // approvedPlan keeps the sealed proposal intact. Apply and resume derive the
 // same executable items from the approval, which is frozen once the run starts.
-func (e *Engine) approvedPlan(ctx context.Context, v *PlanVersion, j journal) (review.Plan, error) {
+func (e *Engine) approvedPlan(ctx context.Context, v *PlanVersion, beforeRun bool) (review.Plan, error) {
 	p := v.Plan
 	if !slices.ContainsFunc(p.Items, func(it review.Item) bool { return it.ApprovalFor != "" }) {
 		return p, nil
@@ -44,7 +43,7 @@ func (e *Engine) approvedPlan(ctx context.Context, v *PlanVersion, j journal) (r
 			if it.UserMapping != nil && it.UserMapping.AccountID != d.AccountID {
 				return review.Plan{}, errors.New("approved account differs from the planned user")
 			}
-			if _, started := j.latest[it.Key]; !started {
+			if beforeRun {
 				remaining[it.Step()] = append(remaining[it.Step()], *it)
 			}
 		case "defer", "skip":
@@ -54,12 +53,15 @@ func (e *Engine) approvedPlan(ctx context.Context, v *PlanVersion, j journal) (r
 			return review.Plan{}, errors.New("invalid stored user decision")
 		}
 	}
+	if !beforeRun {
+		return p, nil
+	}
 	for _, s := range e.Steps {
 		if preflight, ok := s.(interface {
-			BeforeWrites(context.Context, []review.Item) error
+			BeforeWrites(context.Context, []review.Item, string) error
 		}); ok {
-			if err := preflight.BeforeWrites(ctx, remaining[s.Name()]); err != nil {
-				return review.Plan{}, messages.ValidationFailed(err)
+			if err := preflight.BeforeWrites(ctx, remaining[s.Name()], a.ApprovedBy); err != nil {
+				return review.Plan{}, err
 			}
 		}
 	}

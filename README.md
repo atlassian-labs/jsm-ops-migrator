@@ -40,7 +40,7 @@ Review the proposed user mappings before you apply. The [user mapping review gui
 
 ### Apply approved user access
 
-Set the provisioning policy for the target before running `plan`. Omitting the setting produces a review-only plan. Use `scim` for a site managed by an identity provider. Its plan reports missing access for the identity provider to grant. Use `non-scim` only after confirming the site allows the migration to send invitations. The CLI takes this policy from the operator.
+Set the provisioning policy for the target before running `plan`. Omitting the setting produces a review-only plan. Use `scim` when the organization’s identity provider manages the users in scope. The plan reports missing access for the identity provider to grant. Use `non-scim` when the organization allows direct invitations. For mixed directories, defer managed logins during a non-SCIM review and provision those users through the identity provider. The CLI takes this policy from the operator.
 
 ```sh
 export JSM_OPS_MIGRATOR_USER_PROVISIONING=non-scim
@@ -56,7 +56,9 @@ jsm-ops-migrator resume --workspace "$WORKSPACE"
 
 Accepting `propose_invite` authorizes an emailed invitation to the exact login. The address may belong to an account outside the organization. Accepting `propose_access` authorizes the JSM product grant to the named account. Organization invitations require a paid subscription. Each new grant can consume one agent seat. To include individual PagerDuty stakeholders as standard JSM users, pass their IDs to `plan --include-stakeholders P1,P2` and review their seat cost. [Organization invitations API](https://developer.atlassian.com/cloud/admin/organization/rest/api-group-users/)
 
-Before sending invitations, the CLI verifies the target organization and site, rereads the approved identities, and checks remaining seats. The run records the account ID returned for each invitation. Users awaiting acceptance or Operations provisioning appear in the run report. Resume checks readiness and releases dependent work when the Operations account exists. Only ready users appear in the run's mapping CSV. An active JSM user who never becomes ready can still consume a seat.
+For provisioning, the Jira credential needs Browse users and groups and the `read:jira-user` scope. Reading seat capacity also requires Administer Jira and `manage:jira-configuration`. To read another user’s Operations contacts, the caller needs Jira admin or Operations admin access. The org API key needs access to directory searches, workspace discovery and invitations. [Jira application roles](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-application-roles/)
+
+Before sending invitations, the CLI verifies the target organization and site, rereads the approved identities, and checks remaining seats. The run records the account ID returned for each invitation. Users awaiting acceptance or Operations provisioning appear in the run report. Resume checks readiness and releases dependent work when the Operations account exists. Only ready users appear in the run's mapping CSV. Readiness is checked once per user on each pass. To stop waiting for a user, run `resume --skip-verify <item-key>`. Check any site access already granted because it can still consume a seat.
 
 Use `resume` to reconcile a journaled create by looking up its JSM object. Independent items can continue while dependent items wait. If you verify in JSM that no object was made, wait ten minutes from the recorded attempt and run `resume --skip-create <item-key>`. Repeat `--skip-create` for each verified item in the same run. A fresh lookup must also find no match for each skip. The run leaves skipped creates for a new plan and approval. When JSM has acknowledged a create, resume needs to identify its object.
 
