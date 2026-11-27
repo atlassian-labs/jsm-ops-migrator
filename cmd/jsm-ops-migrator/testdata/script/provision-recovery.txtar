@@ -1,0 +1,70 @@
+# Keep review decisions, failed grants and pending checks distinct in the journal.
+env HOME=$WORK/home
+env USERPROFILE=$WORK/home
+env JSM_OPS_MIGRATOR_TEST_APIS=healthy
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+env JSM_OPS_MIGRATOR_ATLASSIAN_EMAIL=operator@example.com
+env JSM_OPS_MIGRATOR_ATLASSIAN_API_TOKEN=atl-canary-0123456789
+env JSM_OPS_MIGRATOR_ORG_API_KEY=org-canary-0123456789
+env JSM_OPS_MIGRATOR_JSM_PLAN=standard
+env JSM_OPS_MIGRATOR_USER_PROVISIONING=non-scim
+env W=$HOME/jsm-ops-migrator/artifacts
+exec jsm-ops-migrator login --site acme --org-id org-1
+exec jsm-ops-migrator plan
+cp $W/plans/v1/mapping.csv ops-reviewed.csv
+review-all ops-reviewed.csv defer P2
+exec jsm-ops-migrator plan approve-mappings --version 1 --csv ops-reviewed.csv
+
+env TEST_ACCESS_PHASE=denied
+! exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
+stderr 'checking Operations contacts permission'
+! exists $W/runs
+
+env TEST_ACCESS_PHASE=refused
+! exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml --output json
+stdout '"state": "completed"'
+stdout 'ROLE_UNAVAILABLE'
+stdout '"failed": 1'
+exec jsm-ops-migrator resume
+stdout 'no run is unfinished'
+
+exec jsm-ops-migrator plan
+cp $W/plans/v2/mapping.csv ops-reviewed.csv
+review-all ops-reviewed.csv defer P2
+exec jsm-ops-migrator plan approve-mappings --version 2 --csv ops-reviewed.csv
+env TEST_ACCESS_PHASE=invite
+! exec jsm-ops-migrator apply --accept-file $W/plans/v2/acceptance-template.yaml --output json
+stdout 'invitation_pending'
+! exec jsm-ops-migrator resume --skip-verify users/access/P2
+stderr 'pending readiness check'
+! exec jsm-ops-migrator resume --skip-verify users/P2 --output json
+stdout 'verification_skipped'
+stdout '"state": "completed"'
+exec jsm-ops-migrator resume
+stdout 'no run is unfinished'
+
+# A changed unstarted grant fails independently when resuming a paused batch.
+exec jsm-ops-migrator plan
+cp $W/plans/v3/mapping.csv ops-reviewed.csv
+review-all ops-reviewed.csv defer P2 P7
+exec jsm-ops-migrator plan approve-mappings --version 3 --csv ops-reviewed.csv
+env TEST_PAUSE_WORKSPACE=$HOME/jsm-ops-migrator
+! exec jsm-ops-migrator apply --accept-file $W/plans/v3/acceptance-template.yaml --output json
+stdout '"state": "paused"'
+env TEST_PAUSE_WORKSPACE=
+env TEST_ACCESS_PHASE=changed
+! exec jsm-ops-migrator resume --output json
+stdout '"state": "completed"'
+stdout '"failed": 1'
+stdout 'directory identity or access differs'
+exec jsm-ops-migrator resume
+stdout 'no run is unfinished'
+
+env TEST_JSM_SEATS=0
+exec jsm-ops-migrator plan --include-stakeholders bad-id,P1
+grep 'stakeholder_not_found' $W/plans/v4/risk-queue.md
+grep 'id: "user_seats"' $W/plans/v4/acceptance-template.yaml
+env TEST_JSM_SEATS=denied
+! exec jsm-ops-migrator plan
+grep 'seat_read_required' $W/plans/v5/risk-queue.md
+grep 'map_existing' $W/plans/v5/mapping.csv

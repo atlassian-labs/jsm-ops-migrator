@@ -90,7 +90,7 @@ func TestRepeatedUsersAndScreenedEmails(t *testing.T) {
 			if err != nil || len(got) != 2 || got[0].Email != "" || !got[0].EmailWithheld || got[1].Email != "second@example.com" {
 				t.Fatalf("screened export or following user lost: %v", err)
 			}
-			if action, _ := got[0].exclusion(); action != "review" {
+			if action, _ := got[0].exclusion(false); action != "review" {
 				t.Fatalf("withheld login action = %s", action)
 			}
 		})
@@ -100,7 +100,7 @@ func TestRepeatedUsersAndScreenedEmails(t *testing.T) {
 func TestIneligibleSourceAndUnknownSiteAccess(t *testing.T) {
 	pending := false
 	for _, u := range []user{{Role: "user", Email: "invalid", Pending: &pending}, {Role: "unknown", Email: "user@example.com", Pending: &pending}, {Role: "user", Email: "user@example.com"}} {
-		if action, _ := u.exclusion(); action != "review" {
+		if action, _ := u.exclusion(false); action != "review" {
 			t.Fatalf("action = %s", action)
 		}
 	}

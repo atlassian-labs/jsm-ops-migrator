@@ -39,10 +39,7 @@ func New(h *httpx.Client, site string) *Client {
 // CurrentAccountID uses the cloud gateway for scoped tokens. Classic tokens
 // can also authenticate directly on the verified site.
 func CurrentAccountID(ctx context.Context, h *httpx.Client, cloudID, site string) (string, error) {
-	if err := rest.CheckSegment("cloud ID", cloudID); err != nil {
-		return "", err
-	}
-	c := rest.Client{H: h, Family: httpx.JiraGateway, Prefix: "/ex/jira/" + cloudID + "/rest/api/3"}
+	c := Gateway(h, cloudID)
 	var user struct {
 		AccountID string `json:"accountId"`
 	}

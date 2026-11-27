@@ -125,7 +125,7 @@ type executor struct {
 	// that is resumed.
 	latest map[string]journalRow
 	// skipCreates are operator-confirmed omissions for journaled items.
-	skipCreates map[string]bool
+	skipCreates, skipVerifies map[string]bool
 	// taken and total count each step's items: taken those with a final
 	// state.
 	taken, total map[string]int
@@ -183,7 +183,9 @@ func (x *executor) run(ctx context.Context) (review.Run, error) {
 		var res Result
 		var stop bool
 		var err error
-		if seen {
+		if it.Action == review.Verify {
+			res, err = x.verify(ctx, db, it, row, seen)
+		} else if seen {
 			res, stop, err = x.settle(ctx, db, it, row)
 		} else {
 			res, stop, err = x.take(ctx, db, it, nil)
@@ -237,6 +239,46 @@ func (x *executor) run(ctx context.Context) (review.Run, error) {
 	}
 	*x.info = final
 	return record, nil
+}
+
+// Verification can be repeated after interruption. Its journal row holds no
+// usable mapping until the account is ready, so its dependents stay pending.
+func (x *executor) verify(ctx, db context.Context, it review.Item, row journalRow, seen bool) (Result, error) {
+	before := row.state
+	if !seen {
+		x.seq++
+		row = journalRow{seq: x.seq, key: it.Key, started: x.e.now()}
+	}
+	var out Outcome
+	var err error
+	if x.skipVerifies[it.Key] {
+		out.Declined = true
+		out.Messages = []messages.Message{{Class: messages.ManualTask, Code: "verification_skipped", Text: "The operator stopped waiting for this user. Review any granted site access before planning again."}}
+	} else {
+		out, err = x.e.step(it.Step()).Apply(ctx, it, x.deps(it))
+	}
+	row.finished, row.jsm, row.msgs = x.e.now(), nil, out.Messages
+	switch {
+	case errors.Is(err, httperr.ErrForbidden), errors.Is(err, httperr.ErrUnauthorized), errors.Is(err, httperr.ErrBadResponse), errors.Is(err, httperr.ErrInvalid):
+		row.state = review.Failed
+		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "verification_failed", Text: fmt.Sprintf("Readiness check failed: %v. Correct the issue and review a fresh plan.", err)}}
+	case err != nil:
+		row.state = sending
+		row.msgs = []messages.Message{{Class: messages.ManualTask, Code: "verification_error", Text: fmt.Sprintf("Readiness check failed: %v. Resume to check again.", err)}}
+	case out.Pending:
+		row.state = sending
+	case out.Declined:
+		row.state = review.Declined
+	case out.JSM != nil:
+		row.state, row.jsm = review.Done, out.JSM
+	default:
+		return Result{}, errors.New("verification returned no object or pending status")
+	}
+	x.checkAnswer(it, &row)
+	if err := x.finish(db, row, it, !seen, before); err != nil {
+		return Result{}, err
+	}
+	return Result{State: entryState(it.Action, row.state), JSM: doneObject(row)}, nil
 }
 
 func doneObject(row journalRow) *review.Ref {
@@ -342,6 +384,11 @@ func (x *executor) take(ctx, db context.Context, it review.Item, prev *journalRo
 	x.seq++
 	row := journalRow{seq: x.seq, key: it.Key, state: review.Done, started: x.e.now(), jsm: it.JSM}
 	if !it.Action.Calls() {
+		if it.Action == review.Skip && it.ApprovalFor != "" {
+			row.msgs = []messages.Message{{Class: messages.Information, Code: "user_excluded", Text: it.Summary}}
+		} else if it.UserMapping != nil && (it.Action == review.Skip || it.Action == review.Manual) {
+			row.msgs = []messages.Message{{Class: messages.Information, Code: "user_review", Text: it.Summary}}
+		}
 		row.finished = row.started
 		if err := x.finish(db, row, it, true, ""); err != nil {
 			return Result{}, false, err
@@ -612,7 +659,7 @@ func (x *executor) checkAnswer(it review.Item, row *journalRow) {
 	for i := range row.msgs {
 		row.msgs[i].Item = it.Key
 	}
-	entry := review.Entry{Key: it.Key, Action: it.Action, State: row.state, PagerDuty: it.PagerDuty, Messages: row.msgs}
+	entry := review.Entry{Key: it.Key, Action: it.Action, State: entryState(it.Action, row.state), PagerDuty: it.PagerDuty, Messages: row.msgs}
 	if err := (review.Run{ID: x.info.ID, State: review.Running, Entries: []review.Entry{entry}}).Check(); err != nil {
 		row.msgs = []messages.Message{{Class: messages.Warning, Code: "answer_unrecorded", Item: it.Key,
 			Text: fmt.Sprintf("The step's messages about this call cannot be recorded: %v", err)}}
@@ -721,7 +768,7 @@ func (x *executor) report(it review.Item, row journalRow) {
 	}
 	step := it.Step()
 	x.e.Progress(Progress{Step: step, Taken: x.taken[step], Total: x.total[step], Entry: review.Entry{
-		Key: it.Key, Action: it.Action, State: row.state, Attempts: row.attempt, Status: row.status,
+		Key: it.Key, Action: it.Action, State: entryState(it.Action, row.state), Attempts: row.attempt, Status: row.status,
 		RequestID: row.requestID, PagerDuty: it.PagerDuty, JSM: row.jsm, At: row.finished, Messages: row.msgs,
 	}})
 }

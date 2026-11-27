@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 
 	// Embedded so time zone handling is identical on Windows, where the
 	// system may not provide a time zone database.
@@ -17,6 +18,8 @@ import (
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/admin"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/jira"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/ops"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/pd"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
 	engine "github.com/atlassian-labs/jsm-ops-migrator/internal/run"
@@ -88,7 +91,17 @@ func run(kc credentials.Keychain, base *httpx.Config) int {
 			if err != nil {
 				return nil, err
 			}
-			return []engine.Step{users.Step{PD: pd.New(h), Admin: admin.New(h), OrgID: env.Config.OrgID, CloudID: env.Config.CloudID}}, nil
+			stakeholders := map[string]bool{}
+			for _, id := range strings.Split(env.Config.IncludeStakeholders, ",") {
+				if id = strings.TrimSpace(id); id != "" {
+					stakeholders[id] = true
+				}
+			}
+			return []engine.Step{users.Step{
+				PD: pd.New(h), Admin: admin.New(h), Jira: jira.Gateway(h, env.Config.CloudID), Ops: ops.New(h, env.Config.CloudID),
+				OrgID: env.Config.OrgID, CloudID: env.Config.CloudID,
+				Provisioning: env.Config.UserProvisioning, IncludeStakeholders: stakeholders,
+			}}, nil
 		}
 	}
 	return cli.Execute(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr, opts)

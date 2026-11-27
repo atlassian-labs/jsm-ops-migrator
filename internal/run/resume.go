@@ -78,6 +78,11 @@ func (e *Engine) CheckResumeSteps(r *Resumable) error {
 // checks, which removes a request left from before, so the one Resume finds
 // was asked during them, after a clean pause and after a crash alike.
 func (e *Engine) Resume(ctx context.Context, skipCreates ...string) (RunResult, error) {
+	return e.ResumeWithSkips(ctx, skipCreates, nil)
+}
+
+// ResumeWithSkips accepts explicit decisions about unresolved creates and pending readiness checks.
+func (e *Engine) ResumeWithSkips(ctx context.Context, skipCreates, skipVerifies []string) (RunResult, error) {
 	r, err := e.CheckResume(ctx)
 	if err != nil {
 		return RunResult{}, err
@@ -102,9 +107,25 @@ func (e *Engine) Resume(ctx context.Context, skipCreates ...string) (RunResult, 
 	if err != nil {
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
-	skips, err := checkSkipCreates(r.Version.Plan, j, skipCreates, e.now())
+	p, err := e.approvedPlan(ctx, r.Version, false)
 	if err != nil {
 		return RunResult{}, err
+	}
+	skips, err := checkSkipCreates(p, j, skipCreates, e.now())
+	if err != nil {
+		return RunResult{}, err
+	}
+	verifySkips := make(map[string]bool, len(skipVerifies))
+	for _, key := range skipVerifies {
+		if key == "" || verifySkips[key] || j.latest[key].state != sending {
+			return RunResult{}, messages.ValidationFailed(errors.New("each --skip-verify key must name a distinct pending readiness check"))
+		}
+		verifySkips[key] = true
+	}
+	for _, it := range p.Items {
+		if verifySkips[it.Key] && it.Action != review.Verify {
+			return RunResult{}, messages.ValidationFailed(errors.New("--skip-verify requires a readiness check"))
+		}
 	}
 	if err := review.WriteConfirmation(e.Workspace, r.Confirmation, r.Version.Plan); err != nil &&
 		!errors.Is(err, review.ErrAlreadyConfirmed) {
@@ -114,8 +135,9 @@ func (e *Engine) Resume(ctx context.Context, skipCreates ...string) (RunResult, 
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}
 	info.State = review.Running
-	x := newExecutor(e, &info, r.Version.Plan, jsm, j)
+	x := newExecutor(e, &info, p, jsm, j)
 	x.skipCreates = skips
+	x.skipVerifies = verifySkips
 	if _, err := x.writeRecord(ctx, info); err != nil {
 		return e.stoppedRun(ctx, info, r.Version.Plan, err)
 	}

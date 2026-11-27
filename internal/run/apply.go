@@ -199,6 +199,10 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 	if err != nil {
 		return RunResult{}, err
 	}
+	p, err := e.approvedPlan(ctx, v, true)
+	if err != nil {
+		return RunResult{}, err
+	}
 	now := e.now()
 	info := RunInfo{
 		ID: newRunID(now), PlanVersion: v.Version, State: review.Running, StartedAt: now,
@@ -221,7 +225,7 @@ func (e *Engine) Apply(ctx context.Context, v *PlanVersion, c review.Confirmatio
 	if err := e.Workspace.RemoveFile(PauseRequestFile); err != nil {
 		return e.stoppedRun(ctx, info, v.Plan, err)
 	}
-	return e.execute(ctx, newExecutor(e, &info, v.Plan, jsm, journal{}))
+	return e.execute(ctx, newExecutor(e, &info, p, jsm, journal{}))
 }
 
 // execute runs x with the root files a running apply keeps: active-run.json,

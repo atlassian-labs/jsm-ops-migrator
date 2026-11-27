@@ -34,12 +34,15 @@ const mappingPlanKey = "plan_hash"
 
 var mappingColumns = []string{"pd_user_id", "pd_email", "pd_role", "proposed_account_id", "target_jsm_access", "proposed_action", "reason", "review_decision"}
 
-func (m UserMapping) canAccept() bool {
+func (m UserMapping) canAccept(action Action) bool {
+	if m.Decision == "propose_invite" {
+		return m.AccountID == "" && action == Verify
+	}
 	return m.AccountID != "" && (m.Decision == "map_existing" || m.Decision == "propose_access")
 }
 
-func (m UserMapping) decisionChoices() string {
-	if m.canAccept() {
+func (m UserMapping) decisionChoices(action Action) string {
+	if m.canAccept(action) {
 		return "accept / defer / skip"
 	}
 	return "defer / skip"
@@ -70,7 +73,7 @@ func proposedMappings(p Plan, hash string) ([]byte, error) {
 		if it.UserMapping == nil {
 			continue
 		}
-		prompt := "Replace with " + it.UserMapping.decisionChoices()
+		prompt := "Replace with " + it.UserMapping.decisionChoices(it.Action)
 		if err := w.Write(append(mappingRow(it), prompt)); err != nil {
 			return nil, err
 		}
@@ -165,13 +168,13 @@ func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error)
 		switch d.Decision {
 		case "accept":
 			m := s.item.UserMapping
-			if !m.canAccept() {
+			if !m.canAccept(s.item.Action) {
 				return nil, fmt.Errorf("record %d has no eligible proposed mapping to accept; set review_decision to defer or skip", n)
 			}
 			d.AccountID = s.item.UserMapping.AccountID
 		case "skip", "defer":
 		default:
-			return nil, fmt.Errorf("record %d: set review_decision to one of %s", n, s.item.UserMapping.decisionChoices())
+			return nil, fmt.Errorf("record %d: set review_decision to one of %s", n, s.item.UserMapping.decisionChoices(s.item.Action))
 		}
 		delete(rows, row[0])
 	}

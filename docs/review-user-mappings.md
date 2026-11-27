@@ -40,6 +40,8 @@ You can rename or move the working copy. Open it in a text editor or spreadsheet
 | `map_existing` | The PagerDuty email matches an active Atlassian account with JSM access on the destination site. Confirm the proposed account ID belongs to the person. | `accept` if correct |
 | `propose_access` | The email matches an active account that needs JSM access on the destination site. Accepting approves the proposed mapping for this plan. | `accept` if intended |
 | `review_directory_miss` | No directory user matched this email. Confirm the person's Atlassian login email. | `defer` while you check |
+| `propose_invite` in a non-SCIM provisioning plan | Confirm the email should receive an invitation to the destination JSM site. An approved invitation can consume an agent seat. | `accept` to authorize the invitation |
+| `identity_provider` in a SCIM provisioning plan | Ask your identity provider administrator to provision JSM access, then run `plan` again. | `defer` while access is pending |
 | Another review or exclusion reason | Read `reason`. For example, an ambiguous match needs investigation, and a pending PagerDuty invitation may account for a user who should be excluded. | `defer` to leave unresolved, or `skip` to exclude from this plan |
 
 For example, if Taylor's row shows `map_existing` and you verified the account, replace `Replace with accept / defer / skip` with `accept`. If Sam's row shows `review_directory_miss`, replace `Replace with defer / skip` with `defer` while you check the login email. A blank cell or a remaining prompt stops approval.
@@ -71,6 +73,6 @@ If the CLI reports an invalid decision, use the record number to find the row in
 cat "$PLAN_DIR/mapping-approval.json"
 ```
 
-Check that `plan_version` matches the version you approved and `plan_hash` matches the second cell in row 1 of your reviewed CSV. Check `approved_by` for the admin's account ID and `approved_at` for the time. Under `decisions`, check each PagerDuty user ID and its decision. Each accepted mapping includes its destination account ID.
+Check that `plan_version` matches the version you approved and `plan_hash` matches the second cell in row 1 of your reviewed CSV. Check `approved_by` for the admin's account ID and `approved_at` for the time. Under `decisions`, check each PagerDuty user ID and its decision. An accepted existing account includes its destination account ID. For an approved invitation to a previously unmatched login, `apply` obtains the account ID from the invitation response.
 
 Repeating the same approval with the same admin preserves the receipt. Before apply starts, a different decision or approver adds the earlier revision to `previous_approvals`. A new plan version needs its own review.
