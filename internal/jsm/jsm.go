@@ -71,8 +71,8 @@ func (c *Client) CheckAccess(ctx context.Context, cloudID string) error {
 }
 
 // CurrentAccountID reads the owner of the personal API token.
-func (c *Client) CurrentAccountID(ctx context.Context, cloudID string) (string, error) {
-	return jira.CurrentAccountID(ctx, c.h, cloudID)
+func (c *Client) CurrentAccountID(ctx context.Context, cloudID, site string) (string, error) {
+	return jira.CurrentAccountID(ctx, c.h, cloudID, site)
 }
 
 // HasAPI reports whether the site has one of the public APIs that are still

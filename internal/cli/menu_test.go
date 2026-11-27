@@ -253,6 +253,10 @@ func TestMenuStatusAtEveryStep(t *testing.T) {
 		{"plan with blockers", with(func(s *MenuState) {
 			s.Plan = &PlanStatus{Version: 2, Blockers: 1, Dir: "/w/artifacts/plan-v2"}
 		}), "Plan v2 has 1 blocker to fix first", "plan"},
+		{"pending mapping review", with(func(s *MenuState) {
+			s.Plan = &PlanStatus{Version: 3, NeedsMappingApproval: true, Dir: "/w/artifacts/plans/v3"}
+		}), "plan approve-mappings --version 3", "quit"},
+		{"old export", with(func(s *MenuState) { s.Plan = &PlanStatus{Version: 3, LegacyMappingExport: true} }), "Choose Plan to refresh", "plan"},
 		{"plan ready", with(func(s *MenuState) { s.Plan = ready }), "Plan v3 is ready: 228 changes, 6 warnings to accept", "apply"},
 		{"apply running", with(func(s *MenuState) {
 			s.Plan, s.Run = ready, &RunStatus{PlanVersion: 3, State: RunRunning, Written: 98, Total: 228}

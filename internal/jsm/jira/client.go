@@ -2,9 +2,12 @@ package jira
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/url"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx"
+	"github.com/atlassian-labs/jsm-ops-migrator/internal/httpx/httperr"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/jsm/internal/rest"
 )
 
@@ -33,9 +36,9 @@ func New(h *httpx.Client, site string) *Client {
 	return &Client{c: rest.Client{H: h, Family: httpx.Site, Site: site, Prefix: "/rest/api/3"}}
 }
 
-// CurrentAccountID identifies the token owner through the gateway, which supports
-// scoped and classic API tokens.
-func CurrentAccountID(ctx context.Context, h *httpx.Client, cloudID string) (string, error) {
+// CurrentAccountID uses the cloud gateway for scoped tokens. Classic tokens
+// can also authenticate directly on the verified site.
+func CurrentAccountID(ctx context.Context, h *httpx.Client, cloudID, site string) (string, error) {
 	if err := rest.CheckSegment("cloud ID", cloudID); err != nil {
 		return "", err
 	}
@@ -43,7 +46,14 @@ func CurrentAccountID(ctx context.Context, h *httpx.Client, cloudID string) (str
 	var user struct {
 		AccountID string `json:"accountId"`
 	}
-	if err := c.Get(ctx, "/myself", nil, &user); err != nil {
+	err := c.Get(ctx, "/myself", nil, &user)
+	if errors.Is(err, httperr.ErrUnauthorized) {
+		err = New(h, site).Get(ctx, "/myself", nil, &user)
+	}
+	if errors.Is(err, httperr.ErrUnauthorized) || errors.Is(err, httperr.ErrForbidden) {
+		return "", fmt.Errorf("verify the admin's Jira access and the token scope for GET /myself (read:jira-user): %w", err)
+	}
+	if err != nil {
 		return "", err
 	}
 	if err := rest.CheckSegment("account ID", user.AccountID); err != nil {

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"fmt"
 	"net/http"
 	"os"
@@ -181,6 +183,19 @@ func TestScripts(t *testing.T) {
 	testscript.Run(t, testscript.Params{
 		Dir: "testdata/script",
 		Cmds: map[string]func(*testscript.TestScript, bool, []string){
+			"review-all": func(ts *testscript.TestScript, neg bool, args []string) {
+				if neg || len(args) != 2 {
+					ts.Fatalf("usage: review-all file decision")
+				}
+				rows, err := csv.NewReader(strings.NewReader(ts.ReadFile(args[0]))).ReadAll()
+				ts.Check(err)
+				for _, row := range rows[1:] {
+					row[len(row)-1] = args[1]
+				}
+				var b bytes.Buffer
+				ts.Check(csv.NewWriter(&b).WriteAll(rows))
+				ts.Check(os.WriteFile(ts.MkAbs(args[0]), b.Bytes(), 0600))
+			},
 			"replace-text": func(ts *testscript.TestScript, neg bool, args []string) {
 				if neg || len(args) != 3 {
 					ts.Fatalf("usage: replace-text file old new")

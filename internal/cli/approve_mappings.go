@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/preflight"
@@ -29,6 +30,9 @@ func runApproveMappings(ctx context.Context, env *Env, version int, path string)
 	if err := e.CheckPlan(ctx, v); err != nil {
 		return err
 	}
+	if v.LegacyMappingExport {
+		return messages.ValidationFailed(errors.New("run plan again to export a CSV with blank review decisions"))
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -42,15 +46,16 @@ func runApproveMappings(ctx context.Context, env *Env, version int, path string)
 	if err != nil {
 		return err
 	}
-	report, err := runChecks(ctx, env, creds, preflight.Login, false)
+	required := []preflight.ID{preflight.Site, preflight.OrgKey, preflight.OrgAdmin}
+	report, err := runChecks(ctx, env, creds, required, false)
 	if err != nil {
 		return err
 	}
-	if err := writePreflightError("approve-mappings", report); err != nil {
+	if err := requiredChecksError("approve-mappings", report, required); err != nil {
 		return err
 	}
 	e.Accounts = migrationAccounts(report, env.Config.OrgID)
-	if err := e.CheckAccounts(v); err != nil {
+	if err := e.CheckAccount(v, review.JSM); err != nil {
 		return err
 	}
 	if report.Operator == nil || !report.Operator.ActiveOrgAdmin {
@@ -60,7 +65,7 @@ func runApproveMappings(ctx context.Context, env *Env, version int, path string)
 	if err != nil {
 		return err
 	}
-	id, err := clients.Atlassian.CurrentAccountID(ctx, report.CloudID)
+	id, err := clients.Atlassian.CurrentAccountID(ctx, report.CloudID, env.Config.Site)
 	if err != nil {
 		return fmt.Errorf("checking the approver's authenticated identity: %w", err)
 	}
@@ -74,6 +79,9 @@ func runApproveMappings(ctx context.Context, env *Env, version int, path string)
 	if env.Output == OutputJSON {
 		return writeJSON(env.Stdout, receipt)
 	}
-	_, err = fmt.Fprintf(env.Stdout, "Recorded %d mapping decisions for plan v%d, approved by %s. See %s.\n", len(decisions), version, review.Quote(id), receipt.Artifact)
+	_, err = fmt.Fprintf(env.Stdout, "Recorded %d mapping decisions for plan v%d, approved by %s. See %s.\n", len(decisions), version, review.Quote(id), displayPath(filepath.Join(env.Workspace.ArtifactsDir(), receipt.Artifact)))
+	if err == nil && len(receipt.History) > 0 {
+		_, err = fmt.Fprintf(env.Stdout, "This receipt retains %d previous approval(s) for this version.\n", len(receipt.History))
+	}
 	return err
 }

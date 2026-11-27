@@ -24,7 +24,15 @@ type MappingApproval struct {
 	ApprovedBy  string                   `json:"approved_by"`
 	ApprovedAt  time.Time                `json:"approved_at"`
 	Decisions   []review.MappingDecision `json:"decisions"`
+	History     []MappingRevision        `json:"previous_approvals,omitempty"`
 	Artifact    string                   `json:"artifact"`
+}
+
+// MappingRevision preserves who made each superseded decision on the same plan.
+type MappingRevision struct {
+	ApprovedBy string                   `json:"approved_by"`
+	ApprovedAt time.Time                `json:"approved_at"`
+	Decisions  []review.MappingDecision `json:"decisions"`
 }
 
 func approvalRef(v int) store.FieldRef {
@@ -64,8 +72,13 @@ func (e *Engine) SaveMappingApproval(ctx context.Context, v *PlanVersion, accoun
 	}
 	a := MappingApproval{PlanVersion: v.Version, PlanHash: v.Hash, ApprovedBy: accountID, ApprovedAt: e.now(), Decisions: decisions, Artifact: filepath.ToSlash(filepath.Join(v.Dir, "mapping-approval.json"))}
 	same := old != nil && old.ApprovedBy == accountID && slices.Equal(old.Decisions, decisions)
-	if same {
-		a.ApprovedAt = old.ApprovedAt
+	if old != nil {
+		a.History = old.History
+		if same {
+			a.ApprovedAt = old.ApprovedAt
+		} else {
+			a.History = append(a.History, MappingRevision{old.ApprovedBy, old.ApprovedAt, old.Decisions})
+		}
 	}
 	data, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
@@ -89,7 +102,7 @@ func (e *Engine) SaveMappingApproval(ctx context.Context, v *PlanVersion, accoun
 }
 
 func (e *Engine) checkMappingApproval(ctx context.Context, v *PlanVersion) error {
-	if !slices.ContainsFunc(v.Plan.Items, func(it review.Item) bool { return it.UserMapping != nil }) {
+	if !v.Plan.HasUserMappings() {
 		return nil
 	}
 	a, err := e.mappingApproval(ctx, v)
@@ -97,6 +110,9 @@ func (e *Engine) checkMappingApproval(ctx context.Context, v *PlanVersion) error
 		return err
 	}
 	if a == nil {
+		if v.LegacyMappingExport {
+			return messages.AwaitingInput(errors.New("run plan again to export a CSV with blank review decisions"))
+		}
 		return messages.AwaitingInput(fmt.Errorf("plan v%d needs reviewed user mappings: run plan approve-mappings --version %d --csv <reviewed.csv>", v.Version, v.Version))
 	}
 	return nil

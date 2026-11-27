@@ -42,8 +42,9 @@ type MenuState struct {
 
 // PlanStatus describes the latest plan version.
 type PlanStatus struct {
-	Version, Changes, Blockers, Warnings int
-	Dir                                  string // its review files
+	NeedsMappingApproval, LegacyMappingExport bool
+	Version, Changes, Blockers, Warnings      int
+	Dir                                       string // its review files
 }
 
 // RunState is the state of the latest apply.
@@ -196,7 +197,7 @@ func describeWorkspace(ctx context.Context, ws *store.Workspace, _ Config, s *Me
 	}
 	if p := st.Plan; p != nil {
 		s.Plan = &PlanStatus{Version: p.Version, Changes: p.Calls, Blockers: p.Blockers, Warnings: p.Warnings,
-			Dir: filepath.Join(ws.ArtifactsDir(), p.Dir)}
+			Dir: filepath.Join(ws.ArtifactsDir(), p.Dir), NeedsMappingApproval: p.NeedsMappingApproval, LegacyMappingExport: p.LegacyMappingExport}
 	}
 	if r := st.Run; r != nil {
 		s.Run = &RunStatus{PlanVersion: r.PlanVersion, State: RunState(r.State), Written: r.Written, Total: r.Total,
@@ -249,6 +250,11 @@ func describeMenu(s MenuState) (lines []string, selected string) {
 		return append(lines,
 			fmt.Sprintf("Plan v%d applied: %d written, %d failed", p.Version, run.Written-run.Failed, run.Failed),
 			"See "+displayPath(run.Record)), "plan"
+	case p.LegacyMappingExport:
+		return append(lines, "Choose Plan to refresh the review files for this workspace."), "plan"
+	case p.NeedsMappingApproval:
+		return append(lines, fmt.Sprintf("Plan v%d needs mapping approval. Review %s.", p.Version, displayPath(filepath.Join(p.Dir, "mapping.csv"))),
+			fmt.Sprintf("Quit the menu and run jsm-ops-migrator plan approve-mappings --version %d --csv <reviewed.csv> with the same workspace.", p.Version)), tui.QuitKey
 	default:
 		return append(lines,
 			fmt.Sprintf("Plan v%d is ready: %s, %s to accept", p.Version, count(p.Changes, "change"), count(p.Warnings, "warning")),

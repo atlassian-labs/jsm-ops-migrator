@@ -42,7 +42,11 @@ stdout 'Plan v1 is unchanged'
 ! exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
 stderr 'needs reviewed user mappings'
 cp $W/plans/v1/mapping.csv reviewed.csv
-replace-text reviewed.csv ',accept' ',defer'
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stderr 'needs an accept, defer or skip decision'
+review-all reviewed.csv ' Defer '
+# The approver uses the sealed plan and target org. No PagerDuty access is needed.
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=invalid-source-key
 cp reviewed.csv altered.csv
 replace-text altered.csv 'account-of-org-1' 'other-account'
 ! exec jsm-ops-migrator plan approve-mappings --version 1 --csv altered.csv
@@ -64,6 +68,7 @@ grep '"review_decision": "defer"' $W/plans/v1/mapping-approval.json
 cp $W/plans/v1/mapping-approval.json first.json
 exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
 cmp first.json $W/plans/v1/mapping-approval.json
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
 ! exists $W/runs
 
 # Without a terminal, the acceptance file is the confirmation.
@@ -75,6 +80,7 @@ exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
 stdout 'of plan v1: 7 of 7 items done'
 exists $W/plans/v1/confirmation.md
 grep 'account-of-org-1' $W/plans/v1/confirmation.md
+grep 'directory confirmed the active organization admin role' $W/plans/v1/confirmation.md
 ! exists $WORK/home/jsm-ops-migrator/active-run.json
 
 # A version is applied once, and a plan with nothing new says so.

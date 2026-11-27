@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/csv"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/atlassian-labs/jsm-ops-migrator/internal/messages"
 )
@@ -40,17 +42,6 @@ func mappingRow(it Item, version int, hash string) []string {
 	return row
 }
 
-func defaultReview(it Item) string {
-	switch it.UserMapping.Decision {
-	case "map_existing", "propose_access":
-		return "accept"
-	case "exclude_pending", "exclude_stakeholder":
-		return "skip"
-	default:
-		return "defer"
-	}
-}
-
 func proposedMappings(p Plan, hash string) ([]byte, error) {
 	var b bytes.Buffer
 	w := csv.NewWriter(&b)
@@ -61,7 +52,7 @@ func proposedMappings(p Plan, hash string) ([]byte, error) {
 		if it.UserMapping == nil {
 			continue
 		}
-		if err := w.Write(append(mappingRow(it, p.Version, hash), defaultReview(it))); err != nil {
+		if err := w.Write(append(mappingRow(it, p.Version, hash), "")); err != nil {
 			return nil, err
 		}
 	}
@@ -69,13 +60,40 @@ func proposedMappings(p Plan, hash string) ([]byte, error) {
 	return b.Bytes(), w.Error()
 }
 
+// A supported header fits on one line. Parse it separately to select the
+// spreadsheet's delimiter without guessing from any user-controlled data cell.
+func mappingReader(r io.Reader) (*csv.Reader, error) {
+	input := bufio.NewReader(r)
+	line, err := input.ReadSlice('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("reading mapping CSV header: %w", err)
+	}
+	line = bytes.TrimPrefix(line, []byte("\uFEFF"))
+	for _, sep := range []rune{',', ';'} {
+		headerReader := csv.NewReader(bytes.NewReader(line))
+		headerReader.Comma = sep
+		header, err := headerReader.Read()
+		if err != nil {
+			continue
+		}
+		if slices.Equal(header, mappingColumns[:7]) {
+			return nil, errors.New("older seven-column mapping CSV: run plan again and review the new export")
+		}
+		if slices.Equal(header, mappingColumns) {
+			reader := csv.NewReader(input)
+			reader.Comma, reader.FieldsPerRecord = sep, -1
+			return reader, nil
+		}
+	}
+	return nil, errors.New("invalid mapping CSV header: use the columns exported by this plan with comma or semicolon separators")
+}
+
 // ImportMappings checks immutable cells against the sealed plan, independent
 // of CSV row order. Never echo cell contents in a validation error.
 func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error) {
-	reader := csv.NewReader(r)
-	header, err := reader.Read()
-	if err != nil || !slices.Equal(header, mappingColumns) {
-		return nil, errors.New("missing or invalid mapping CSV header; use the mapping.csv exported by this plan")
+	reader, err := mappingReader(r)
+	if err != nil {
+		return nil, err
 	}
 	var decisions []MappingDecision
 	type source struct {
@@ -106,6 +124,12 @@ func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error)
 		if err != nil {
 			return nil, fmt.Errorf("invalid mapping CSV at record %d", n)
 		}
+		if !slices.ContainsFunc(row, func(cell string) bool { return cell != "" }) {
+			continue
+		}
+		if len(row) != len(mappingColumns) {
+			return nil, fmt.Errorf("record %d needs %d columns", n, len(mappingColumns))
+		}
 		s, ok := rows[row[0]]
 		if !ok {
 			return nil, fmt.Errorf("unknown or duplicate PagerDuty user at record %d", n)
@@ -114,10 +138,11 @@ func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error)
 			return nil, fmt.Errorf("record %d differs from plan v%d; only review_decision may be edited", n, p.Version)
 		}
 		d := &decisions[s.index]
-		d.Decision = row[len(row)-1]
+		d.Decision = strings.ToLower(strings.TrimSpace(row[len(row)-1]))
 		switch d.Decision {
 		case "accept":
-			if defaultReview(s.item) != "accept" || s.item.UserMapping.AccountID == "" {
+			m := s.item.UserMapping
+			if (m.Decision != "map_existing" && m.Decision != "propose_access") || m.AccountID == "" {
 				return nil, fmt.Errorf("record %d has no eligible proposed mapping to accept", n)
 			}
 			d.AccountID = s.item.UserMapping.AccountID

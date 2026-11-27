@@ -349,3 +349,12 @@ func TestReportFindAndWith(t *testing.T) {
 		t.Error("found a check that did not run")
 	}
 }
+func TestDirectoryVerifiedOrgAdmin(t *testing.T) {
+	f := testkit.HealthyAPIs(now)
+	f.ActiveOrgAdmin = true
+	r := runChecks(t, f, healthyInput())
+	got, _ := status(t, r, preflight.OrgAdmin)
+	if got != preflight.OK || r.Operator == nil || !r.Operator.ActiveOrgAdmin {
+		t.Fatalf("org admin check: %v, %+v", got, r.Operator)
+	}
+}

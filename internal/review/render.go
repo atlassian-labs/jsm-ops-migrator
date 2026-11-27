@@ -249,7 +249,11 @@ func RenderConfirmation(c Confirmation, p Plan) []byte {
 	fmt.Fprintf(&b, "# Confirmation of plan v%d\n\n", c.PlanVersion)
 	fmt.Fprintf(&b, "- Confirmed: %s, by Atlassian account %s, through the %s\n", stamp(c.At), code(c.AccountID), text(c.Via))
 	fmt.Fprintf(&b, "- plan.json: %s\n", code(c.PlanHash))
-	b.WriteString("- No API shows whether the account is an org admin, so this record says who confirmed, not that they are one.\n")
+	if c.ActiveOrgAdmin {
+		b.WriteString("- The directory confirmed the active organization admin role.\n")
+	} else {
+		b.WriteString("- The active organization admin role was not confirmed in this record.\n")
+	}
 	fmt.Fprintf(&b, "\n## Accepted warnings\n\n")
 	if len(c.Accepted) == 0 {
 		b.WriteString("The plan has no warnings.\n")

@@ -23,9 +23,10 @@ type PlanVersion struct {
 	Version int
 	// Hash is the hash of the version's plan.json, which apply checks the
 	// file against before it runs it.
-	Hash        string
-	ContentHash string
-	CreatedAt   time.Time
+	Hash                string
+	ContentHash         string
+	LegacyMappingExport bool
+	CreatedAt           time.Time
 	// PagerDutyRead and JSMRead are the reads the plan was built from.
 	PagerDutyRead, JSMRead    int64
 	Calls, Blockers, Warnings int
@@ -140,9 +141,9 @@ func (e *Engine) Plan(ctx context.Context, pagerDuty, jsm *discover.Snapshot) (P
 		Dir: review.PlanDir(p.Version), Plan: p,
 	}
 	_, err = e.Store.DB().ExecContext(ctx, `INSERT INTO plan_versions(version, hash, content_hash, created_at,
-		pagerduty_read, jsm_read, calls, blockers, warnings, dir, plan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pagerduty_read, jsm_read, calls, blockers, warnings, dir, plan, requires_mapping_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.Version, v.Hash, v.ContentHash, formatTime(v.CreatedAt), v.PagerDutyRead, v.JSMRead,
-		v.Calls, v.Blockers, v.Warnings, filepath.ToSlash(v.Dir), sealed)
+		v.Calls, v.Blockers, v.Warnings, filepath.ToSlash(v.Dir), sealed, p.HasUserMappings())
 	if err != nil {
 		return PlanResult{}, err
 	}
@@ -163,7 +164,7 @@ func (e *Engine) Plan(ctx context.Context, pagerDuty, jsm *discover.Snapshot) (P
 // review file: the operator reviews them, apply points at the acceptance
 // template, and a version's folder is never written into again.
 func (e *Engine) unchanged(ctx context.Context, latest *PlanVersion, content string, next int) (bool, error) {
-	if latest == nil || latest.ContentHash != content || next != latest.Version+1 {
+	if latest == nil || latest.LegacyMappingExport || latest.ContentHash != content || next != latest.Version+1 {
 		return false, nil
 	}
 	dir := filepath.Join(e.Workspace.ArtifactsDir(), latest.Dir)
@@ -278,8 +279,8 @@ func (e *Engine) Version(ctx context.Context, version int) (*PlanVersion, error)
 	var pd, jsm sql.NullInt64
 	var sealed []byte
 	err := e.Store.DB().QueryRowContext(ctx, `SELECT hash, content_hash, created_at, pagerduty_read, jsm_read,
-		calls, blockers, warnings, dir, plan FROM plan_versions WHERE version = ?`, version).
-		Scan(&v.Hash, &v.ContentHash, &created, &pd, &jsm, &v.Calls, &v.Blockers, &v.Warnings, &dir, &sealed)
+		calls, blockers, warnings, dir, plan, requires_mapping_review IS NULL FROM plan_versions WHERE version = ?`, version).
+		Scan(&v.Hash, &v.ContentHash, &created, &pd, &jsm, &v.Calls, &v.Blockers, &v.Warnings, &dir, &sealed, &v.LegacyMappingExport)
 	if err != nil {
 		return nil, fmt.Errorf("plan v%d: %w", version, err)
 	}

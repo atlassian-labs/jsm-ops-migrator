@@ -34,13 +34,34 @@ func TestImportReviewedMappings(t *testing.T) {
 		}
 		return ImportMappings(&b, p, hash)
 	}
-	rows := parse(t)
+	if _, err := ImportMappings(bytes.NewReader(export), p, hash); err == nil {
+		t.Fatal("unedited export approved")
+	}
+	reviewed := func(t *testing.T) [][]string {
+		rows := parse(t)
+		rows[1][9], rows[2][9] = "  AcCePt ", "defer"
+		return rows
+	}
+	rows := reviewed(t)
 	rows[1], rows[2] = rows[2], rows[1]
 	rows[1][9] = "skip"
 	got, err := check(t, rows)
 	want := []MappingDecision{{"P1", "accept", "account"}, {"P2", "skip", ""}}
 	if err != nil || !slices.Equal(got, want) {
 		t.Fatalf("got %+v, %v", got, err)
+	}
+	for _, sep := range []rune{',', ';'} {
+		var b bytes.Buffer
+		b.WriteString("\uFEFF")
+		w := csv.NewWriter(&b)
+		w.Comma, w.UseCRLF = sep, true
+		if err := w.WriteAll(append(rows, make([]string, len(mappingColumns)))); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ImportMappings(&b, p, hash)
+		if err != nil || !slices.Equal(got, want) {
+			t.Fatalf("spreadsheet import (%c): %v, %v", sep, got, err)
+		}
 	}
 	for _, tc := range []struct {
 		name string
@@ -58,7 +79,7 @@ func TestImportReviewedMappings(t *testing.T) {
 		{"old header", func(r [][]string) [][]string { r[0] = r[0][:7]; return r }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got, err := check(t, tc.edit(parse(t))); err == nil || got != nil {
+			if got, err := check(t, tc.edit(reviewed(t))); err == nil || got != nil {
 				t.Fatalf("accepted invalid review: %+v", got)
 			}
 		})
