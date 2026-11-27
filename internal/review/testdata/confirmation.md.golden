@@ -2,7 +2,7 @@
 
 - Confirmed: 2026-11-12 10:10:00 UTC, by Atlassian account `712020:0000cccc`, through the acceptance file
 - plan.json: `sha256:784992a95163c6071a0e07883bfd0b053acc3d5a2f796c6f0712b601463bda19`
-- No API shows whether the account is an org admin, so this record says who confirmed, not that they are one.
+- The active organization admin role was not confirmed in this record.
 
 ## Accepted warnings
 

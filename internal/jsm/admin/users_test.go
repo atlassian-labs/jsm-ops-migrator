@@ -57,11 +57,15 @@ func TestFindUsersBatchesAndFollowsPages(t *testing.T) {
 	for i, r := range reqs {
 		var body struct {
 			Emails []string
+			Expand []string
 			Limit  int
 			Cursor string
 		}
 		if err := json.Unmarshal(r.Body, &body); err != nil {
 			t.Fatal(err)
+		}
+		if !slices.Equal(body.Expand, []string{"platformRoles"}) {
+			t.Fatalf("directory query omitted administrator role expansion: %v", body.Expand)
 		}
 		want := emails[:100]
 		if i == 2 {

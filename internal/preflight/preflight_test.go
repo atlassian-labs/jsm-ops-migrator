@@ -54,7 +54,7 @@ func TestEveryCheckPassesWhenAllIsWell(t *testing.T) {
 		ids = append(ids, c.ID)
 		want := preflight.OK
 		if c.ID == preflight.OrgAdmin {
-			want = preflight.Warning // no API returns the org admin role
+			want = preflight.Warning // this fixture has no verified org admin role
 		}
 		if c.Status != want || c.Title == "" || c.Detail == "" {
 			t.Errorf("%s: %s %q, want %s", c.ID, c.Status, c.Detail, want)
@@ -347,5 +347,14 @@ func TestReportFindAndWith(t *testing.T) {
 	in.Checks = []preflight.ID{preflight.JSMPlan}
 	if _, ok := runChecks(t, testkit.HealthyAPIs(now), in).Find(preflight.Clock); ok {
 		t.Error("found a check that did not run")
+	}
+}
+func TestDirectoryVerifiedOrgAdmin(t *testing.T) {
+	f := testkit.HealthyAPIs(now)
+	f.ActiveOrgAdmin = true
+	r := runChecks(t, f, healthyInput())
+	got, _ := status(t, r, preflight.OrgAdmin)
+	if got != preflight.OK || r.Operator == nil || !r.Operator.ActiveOrgAdmin {
+		t.Fatalf("org admin check: %v, %+v", got, r.Operator)
 	}
 }

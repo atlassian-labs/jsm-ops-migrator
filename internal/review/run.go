@@ -20,10 +20,10 @@ type Confirmation struct {
 	PlanVersion int    `json:"plan_version"`
 	PlanHash    string `json:"plan_hash"`
 	// AccountID is the Atlassian account whose API token runs apply. The
-	// token is personal, so the account names the person who confirmed. No
-	// API shows whether it is an org admin, so that is recorded, not checked.
-	AccountID string    `json:"account_id"`
-	At        time.Time `json:"confirmed_at"`
+	// token is personal, so the account names the person who confirmed.
+	AccountID      string    `json:"account_id"`
+	ActiveOrgAdmin bool      `json:"active_org_admin,omitempty"`
+	At             time.Time `json:"confirmed_at"`
 	// Via is how the warnings were accepted: ViaPrompt or ViaFile.
 	Via      string     `json:"via"`
 	Accepted []Accepted `json:"accepted_warnings"`

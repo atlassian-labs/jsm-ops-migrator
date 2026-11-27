@@ -23,7 +23,8 @@ type Status struct {
 
 // PlanSummary is a plan version without its plan, which is sealed.
 type PlanSummary struct {
-	Version, Calls, Blockers, Warnings int
+	NeedsMappingApproval, LegacyMappingExport bool
+	Version, Calls, Blockers, Warnings        int
 	// Dir is the version's folder, relative to artifacts/.
 	Dir string
 }
@@ -62,6 +63,21 @@ func ReadStatus(ctx context.Context, ws *store.Workspace) (Status, error) {
 		return Status{}, fmt.Errorf("reading state.db: %w", err)
 	default:
 		p.Dir = filepath.FromSlash(dir)
+		// ReadStatus also runs before an older workspace has been migrated.
+		var current bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('plan_versions') WHERE name = 'requires_mapping_review')`).Scan(&current); err != nil {
+			return Status{}, err
+		}
+		if current {
+			err := db.QueryRowContext(ctx, `SELECT requires_mapping_review IS NULL AND a.plan_version IS NULL,
+				COALESCE(requires_mapping_review, 0) AND a.plan_version IS NULL
+				FROM plan_versions p LEFT JOIN mapping_approvals a ON a.plan_version = p.version WHERE p.version = ?`, p.Version).Scan(&p.LegacyMappingExport, &p.NeedsMappingApproval)
+			if err != nil {
+				return Status{}, err
+			}
+		} else {
+			p.LegacyMappingExport = true
+		}
 		s.Plan = &p
 	}
 	// Runs apply increasing plan versions, even if the system clock moves back.

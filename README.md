@@ -6,7 +6,7 @@ jsm-ops-migrator is a command-line tool that moves a PagerDuty on-call setup to 
 
 Rebuilding users, teams, schedules and escalation policies by hand is slow and easy to get wrong. The CLI reads your PagerDuty account, shows you a plan of every change it would make, writes nothing until you confirm, and reports anything it could not move exactly.
 
-> **Status:** early development. There is no release yet, so the tool cannot be installed or run. The project follows [semantic versioning](https://semver.org/) and stays below 1.0 while it is in Labs.
+> **Status:** early development. Build the CLI from source to try it before the first packaged release. The project follows [semantic versioning](https://semver.org/) and stays below 1.0 while it is in Labs.
 
 ## What it migrates
 
@@ -36,7 +36,7 @@ The CLI will work in three steps:
 
 Use a separate `--workspace` for each migration. The first read of each side binds the workspace to its PagerDuty account host or its JSM cloud ID and organization ID. You can rotate credentials for those accounts. Each plan version writes its own `acceptance-template.yaml`.
 
-Review proposed user identities in `artifacts/plans/v<N>/mapping.csv` inside the workspace. Each row gives the PagerDuty login email, the proposed account ID when available, target-site JSM access, and the reason for the proposed action. A directory miss can also mean the account exists outside the organization. This step produces proposals only. After a run, `artifacts/runs/<id>/mapping.csv` lists the links actually made during that run. Use the file under `plans/` for identity review.
+Review the proposed user mappings before you apply. The [user mapping review guide](docs/review-user-mappings.md) walks through exporting the CSV, choosing a decision for each user, approving the plan and checking the receipt.
 
 Use `resume` to reconcile a journaled create by looking up its JSM object. Independent items can continue while dependent items wait. If you verify in JSM that no object was made, wait ten minutes from the recorded attempt and run `resume --skip-create <item-key>`. Repeat `--skip-create` for each verified item in the same run. A fresh lookup must also find no match for each skip. The run leaves skipped creates for a new plan and approval. When JSM has acknowledged a create, resume needs to identify its object.
 
@@ -48,7 +48,7 @@ Installation instructions will be added with the first release.
 
 ## Documentation
 
-For now, this README is the documentation. A post-migration guide for the areas you set up by hand (integrations, policies, maintenance windows and routing) will be added in a `docs` folder.
+See [Review and approve user mappings](docs/review-user-mappings.md) for a worked example of the identity review.
 
 ## Tests
 

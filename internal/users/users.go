@@ -201,7 +201,7 @@ func proposal(m admin.UserMatch) (action, reason string) {
 	case m.Ambiguous:
 		return "review_ambiguous", "Conflicting directory records for this exact email."
 	case m.AccountID == "":
-		return "review_directory_miss", "No exact match in visible directories; an account may exist outside the organization."
+		return "review_directory_miss", "No user in your Atlassian organization’s directory matched this PagerDuty email. Choose defer while you confirm the person’s Atlassian login email."
 	case !m.Active():
 		return "review_inactive", "The directory did not confirm an active account."
 	case m.SiteAccess == "yes":

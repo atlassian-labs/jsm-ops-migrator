@@ -371,9 +371,10 @@ func (r *run) orgAdmin() (Status, string) {
 		return notChecked(err)
 	}
 	r.report.Operator = &acct
-	// No API is known to return the org admin role, so finding the account is
-	// as far as the check can go.
-	return Warning, "the account is in the organization, but no API shows whether it is an org admin: make sure it is"
+	if acct.ActiveOrgAdmin {
+		return OK, "the directory confirms the active organization admin account"
+	}
+	return Warning, "the account is in the organization, but its active org admin role was not confirmed"
 }
 
 func (r *run) jsmPlan() (Status, string) {

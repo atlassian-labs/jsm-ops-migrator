@@ -132,15 +132,15 @@ func TestFindUserMatchesTheEmail(t *testing.T) {
 	f, c := fake(t)
 	path := f.AdminPath("/v2/orgs/org-1/directories/-/users/search")
 	f.Answer(http.MethodPost, path, http.StatusOK, map[string]any{"data": []any{
-		map[string]any{"accountId": "acc-1", "email": "Operator@Example.com"},
+		map[string]any{"accountId": "acc-1", "email": "Operator@Example.com", "accountStatus": "active", "membershipStatus": "active", "platformRoles": []string{"atlassian/org-admin"}},
 	}, "links": map[string]any{"next": nil}})
 
 	got, err := c.FindUser(context.Background(), "org-1", credentials.NewSensitive("operator@example.com"))
-	if err != nil || got.AccountID != "acc-1" {
+	if err != nil || got.AccountID != "acc-1" || !got.ActiveOrgAdmin {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	r := f.Requests()[0]
-	if r.Method != http.MethodPost || string(r.Body) != `{"emails":["operator@example.com"],"limit":100}` {
+	if r.Method != http.MethodPost || string(r.Body) != `{"emails":["operator@example.com"],"limit":100,"expand":["platformRoles"]}` {
 		t.Fatalf("request %s %s", r.Method, r.Body)
 	}
 }

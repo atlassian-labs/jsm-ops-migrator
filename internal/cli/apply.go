@@ -104,7 +104,7 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 		return out.emit(env, err)
 	}
 	// The API token runs every call, and it is personal, so its account is
-	// who confirms. No API shows whether it is an org admin.
+	// who confirms.
 	if report.Operator == nil || report.Operator.AccountID == "" {
 		return out.emit(env, errors.New("apply: the org admin check did not find your account, so the confirmation cannot name it"))
 	}
@@ -135,7 +135,7 @@ func runApply(ctx context.Context, env *Env, f ApplyFlags) error {
 	if interrupted(env) {
 		return stopped()
 	}
-	c := review.Confirmation{PlanVersion: v.Version, PlanHash: v.Hash, AccountID: report.Operator.AccountID}
+	c := review.Confirmation{PlanVersion: v.Version, PlanHash: v.Hash, AccountID: report.Operator.AccountID, ActiveOrgAdmin: report.Operator.ActiveOrgAdmin}
 	if accept != nil {
 		c.Via = review.ViaFile
 		if c.Accepted, err = accept.Accept(v.Plan, v.Hash); err != nil {
@@ -183,11 +183,15 @@ var writeNeeds = []preflight.ID{preflight.PagerDutyKey, preflight.Site, prefligh
 
 // writePreflightError also rejects required checks that could not run.
 func writePreflightError(command string, report preflight.Report) error {
+	return requiredChecksError(command, report, writeNeeds)
+}
+
+func requiredChecksError(command string, report preflight.Report, required []preflight.ID) error {
 	if err := checksError(command, report); err != nil {
 		return err
 	}
 	var titles []string
-	for _, id := range writeNeeds {
+	for _, id := range required {
 		if c, ok := report.Find(id); !ok || (c.Status != preflight.OK && c.Status != preflight.Warning) {
 			titles = append(titles, id.Title())
 		}

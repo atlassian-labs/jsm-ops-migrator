@@ -38,7 +38,8 @@ type FakeAPIs struct {
 	// AccountID, when set, is the account the org admin check finds instead
 	// of account-of-<organization>, as when someone else's credentials are
 	// given.
-	AccountID string
+	AccountID      string
+	ActiveOrgAdmin bool
 
 	mu    sync.Mutex
 	calls []string
@@ -106,6 +107,13 @@ func (c fakeClients) atlassianOK() bool {
 		accepted(c.f.AtlassianToken, c.creds.AtlassianToken.Reveal())
 }
 
+func (c fakeClients) CurrentAccountID(context.Context, string, string) (string, error) {
+	if !c.atlassianOK() {
+		return "", httperr.ErrUnauthorized
+	}
+	return c.f.AccountID, nil
+}
+
 func (c fakeClients) CheckAccess(_ context.Context, cloudID string) error {
 	c.f.record("ops teams " + cloudID)
 	if !c.atlassianOK() {
@@ -146,10 +154,10 @@ func (c fakeClients) FindUser(_ context.Context, orgID string, email credentials
 	}
 	for _, m := range c.f.Members[orgID] {
 		if m == email.Value() && c.f.AccountID != "" {
-			return preflight.Account{AccountID: c.f.AccountID}, nil
+			return preflight.Account{AccountID: c.f.AccountID, ActiveOrgAdmin: c.f.ActiveOrgAdmin}, nil
 		}
 		if m == email.Value() {
-			return preflight.Account{AccountID: "account-of-" + orgID}, nil
+			return preflight.Account{AccountID: "account-of-" + orgID, ActiveOrgAdmin: c.f.ActiveOrgAdmin}, nil
 		}
 	}
 	return preflight.Account{}, fmt.Errorf("user search: %w", httperr.ErrNotFound)

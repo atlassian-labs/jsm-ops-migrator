@@ -19,24 +19,65 @@ exec jsm-ops-migrator plan
 stdout 'Read PagerDuty: complete'
 stdout 'Read JSM: complete'
 stdout 'Plan v1: 0 calls'
+stdout 'copy .*mapping[.]csv and enter one choice in review_decision for every user row'
 stdout 'Messages: 0 blockers, 0 warnings, 0 manual tasks, 0 information'
 exists $W/plans/v1/plan.json
 exists $W/plans/v1/plan.md
 exists $W/plans/v1/diff.md
 exists $W/plans/v1/risk-queue.md
 exists $W/plans/v1/acceptance-template.yaml
+grep '^plan_hash,sha256:[0-9a-f]{64},{6}$' $W/plans/v1/mapping.csv
+grep '^pd_user_id,pd_email,pd_role,proposed_account_id,target_jsm_access,proposed_action,reason,review_decision$' $W/plans/v1/mapping.csv
 grep 'P1,operator@example.com,admin,account-of-org-1,yes,map_existing' $W/plans/v1/mapping.csv
-grep 'P2,missing@example.com,user,,,review_directory_miss' $W/plans/v1/mapping.csv
+grep 'P2,missing@example[.]com,user,,,review_directory_miss,No user in your Atlassian organization’s directory matched this PagerDuty email[.] Choose defer while you confirm the person’s Atlassian login email[.],' $W/plans/v1/mapping.csv
 grep 'P3,pending@example.com,user,,,exclude_pending' $W/plans/v1/mapping.csv
 grep 'P4,stakeholder@example.com,read_only_limited_user,,,exclude_stakeholder' $W/plans/v1/mapping.csv
 grep 'P5,inactive@example.com,user,,,review_inactive' $W/plans/v1/mapping.csv
 grep 'P6,ambiguous@example.com,user,,,review_ambiguous' $W/plans/v1/mapping.csv
 grep 'P7,other-site@example.com,user,other-site,no,propose_access' $W/plans/v1/mapping.csv
+grep 'map_existing,.*,Replace with accept / defer / skip$' $W/plans/v1/mapping.csv
+grep 'propose_access,.*,Replace with accept / defer / skip$' $W/plans/v1/mapping.csv
+grep 'review_directory_miss,.*,Replace with defer / skip$' $W/plans/v1/mapping.csv
 
 exec jsm-ops-migrator plan --only jsm
 stdout 'Plan v1 is unchanged'
 exec jsm-ops-migrator plan --only pagerduty
 stdout 'Plan v1 is unchanged'
+
+# Approval binds the reviewed CSV to this version and the authenticated administrator.
+! exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
+stderr 'needs reviewed user mappings'
+cp $W/plans/v1/mapping.csv reviewed.csv
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stderr 'record 3: set review_decision to one of accept / defer / skip'
+! exists $W/plans/v1/mapping-approval.json
+review-all reviewed.csv ' Defer '
+# The approver uses the sealed plan and target org. No PagerDuty access is needed.
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=invalid-source-key
+cp reviewed.csv altered.csv
+replace-text altered.csv 'account-of-org-1' 'other-account'
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv altered.csv
+stderr 'only review_decision may be edited'
+env JSM_OPS_MIGRATOR_TEST_NON_ADMIN=1
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stderr 'requires an active account with the organization admin role'
+env JSM_OPS_MIGRATOR_TEST_NON_ADMIN=
+env JSM_OPS_MIGRATOR_TEST_OTHER_CALLER=1
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stderr 'authenticated account differs'
+env JSM_OPS_MIGRATOR_TEST_OTHER_CALLER=
+! exists $W/plans/v1/mapping-approval.json
+exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stdout 'Recorded 7 mapping decisions for plan v1'
+grep '"approved_by": "account-of-org-1"' $W/plans/v1/mapping-approval.json
+grep '"plan_version": 1' $W/plans/v1/mapping-approval.json
+grep '"review_decision": "defer"' $W/plans/v1/mapping-approval.json
+! grep '"review_decision": "accept"' $W/plans/v1/mapping-approval.json
+cp $W/plans/v1/mapping-approval.json first.json
+exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+cmp first.json $W/plans/v1/mapping-approval.json
+env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=pd-canary-0123456789
+! exists $W/runs
 
 # Without a terminal, the acceptance file is the confirmation.
 ! exec jsm-ops-migrator apply --pagerduty-region EU
@@ -47,6 +88,7 @@ exec jsm-ops-migrator apply --accept-file $W/plans/v1/acceptance-template.yaml
 stdout 'of plan v1: 7 of 7 items done'
 exists $W/plans/v1/confirmation.md
 grep 'account-of-org-1' $W/plans/v1/confirmation.md
+grep 'directory confirmed the active organization admin role' $W/plans/v1/confirmation.md
 ! exists $WORK/home/jsm-ops-migrator/active-run.json
 
 # A version is applied once, and a plan with nothing new says so.
@@ -77,6 +119,12 @@ grep 'lookup_required' $W/plans/v2/risk-queue.md
 exec jsm-ops-migrator plan --only jsm
 grep 'P1,changed@example.com,admin,,,review_directory_miss' $W/plans/v3/mapping.csv
 
+! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
+stderr 'not the latest'
+! exec jsm-ops-migrator plan approve-mappings --version 3 --csv reviewed.csv
+stderr 'mapping CSV plan identifier differs from plan v3'
+! exists $W/plans/v3/mapping-approval.json
+
 # Failed directory coverage cannot turn a missing result into a proposal.
 env JSM_OPS_MIGRATOR_TEST_DIRECTORY_DENIED=1
 ! exec jsm-ops-migrator plan --only jsm
@@ -84,3 +132,18 @@ stdout 'Read JSM: incomplete'
 grep 'users_jsm_read' $W/plans/v4/risk-queue.md
 ! grep 'lookup_required' $W/plans/v4/risk-queue.md
 ! grep 'review_directory_miss' $W/plans/v4/mapping.csv
+
+# Restoring both inputs reproduces v1's user rows in a different sealed plan.
+env JSM_OPS_MIGRATOR_TEST_DIRECTORY_DENIED=
+env JSM_OPS_MIGRATOR_TEST_CHANGED_EMAIL=
+exec jsm-ops-migrator plan
+stdout 'Plan v5:'
+same-mapping-proposals $W/plans/v1/mapping.csv $W/plans/v5/mapping.csv
+! exec jsm-ops-migrator plan approve-mappings --version 5 --csv reviewed.csv
+stderr 'mapping CSV plan identifier differs from plan v5'
+! exists $W/plans/v5/mapping-approval.json
+cp $W/plans/v5/mapping.csv approved-by-ops.csv
+review-all approved-by-ops.csv defer
+exec jsm-ops-migrator plan approve-mappings --version 5 --csv approved-by-ops.csv
+stdout 'Recorded 7 mapping decisions for plan v5'
+grep '"plan_version": 5' $W/plans/v5/mapping-approval.json

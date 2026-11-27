@@ -340,6 +340,11 @@ func Hash(data []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// HasUserMappings reports whether apply requires the CSV review step.
+func (p Plan) HasUserMappings() bool {
+	return slices.ContainsFunc(p.Items, func(it Item) bool { return it.UserMapping != nil })
+}
+
 // ContentHash names what a plan would do: its accounts, items and messages, without
 // its version, its time or when the sides were read. Two plans with the same
 // content hash are the same plan, so plan makes no new version for it.
@@ -354,11 +359,21 @@ func ContentHash(p Plan) (string, error) {
 			accounts = append(accounts, read.MigrationAccount)
 		}
 	}
+	// A changed identity review format requires a fresh export even when all
+	// proposed users match the previous version.
+	var mappingFormat int
+	var columns []string
+	if n.HasUserMappings() {
+		mappingFormat = 3 // The plan identifier is now a file-level metadata record.
+		columns = mappingColumns
+	}
 	data, err := encodeJSON(struct {
-		Accounts []MigrationAccount `json:"accounts,omitempty"`
-		Items    []Item             `json:"items"`
-		Messages []messages.Message `json:"messages"`
-	}{accounts, n.Items, n.Messages})
+		MappingFormat  int                `json:"mapping_format,omitempty"`
+		MappingColumns []string           `json:"mapping_columns,omitempty"`
+		Accounts       []MigrationAccount `json:"accounts,omitempty"`
+		Items          []Item             `json:"items"`
+		Messages       []messages.Message `json:"messages"`
+	}{mappingFormat, columns, accounts, n.Items, n.Messages})
 	if err != nil {
 		return "", err
 	}

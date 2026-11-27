@@ -146,6 +146,25 @@ func (r *runner) newRootCommand() *cobra.Command {
 	}
 	plan.Flags().StringVar(&r.plan.Only, "only", "", "re-read just one side: pagerduty or jsm")
 
+	var mappingFile string
+	var version int
+	approve := &cobra.Command{
+		Use: "approve-mappings", Short: "Import reviewed user mappings and approve them for one plan version",
+		Args: cobra.NoArgs,
+		PreRunE: func(*cobra.Command, []string) error {
+			if version < 1 || mappingFile == "" {
+				return errors.New("give --version and --csv for the plan you reviewed")
+			}
+			return nil
+		},
+		RunE: r.wrap(commandSpec{name: "approve-mappings", lock: true}, func(ctx context.Context, env *Env) error {
+			return runApproveMappings(ctx, env, version, mappingFile)
+		}),
+	}
+	approve.Flags().IntVar(&version, "version", 0, "plan version reviewed")
+	approve.Flags().StringVar(&mappingFile, "csv", "", "reviewed mapping CSV for this plan")
+	plan.AddCommand(approve)
+
 	apply := &cobra.Command{
 		Use:   "apply",
 		Short: "Write the confirmed plan to JSM Operations",

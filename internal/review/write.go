@@ -52,7 +52,7 @@ func WritePlanVersion(ws *store.Workspace, p Plan, prev *Plan) (string, error) {
 	if err := removeUncommitted(ws); err != nil {
 		return "", fmt.Errorf("writing plan v%d: %w", p.Version, err)
 	}
-	mapping, err := proposedMappings(p)
+	mapping, err := proposedMappings(p, hash)
 	if err != nil {
 		return "", err
 	}

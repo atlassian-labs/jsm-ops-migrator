@@ -102,6 +102,9 @@ func (e *Engine) CheckPlanSteps(ctx context.Context, v *PlanVersion) error {
 }
 
 func (e *Engine) checkedPlanRead(ctx context.Context, v *PlanVersion) (*discover.Snapshot, error) {
+	if err := e.checkMappingApproval(ctx, v); err != nil {
+		return nil, err
+	}
 	if err := e.checkSteps(); err != nil {
 		return nil, err
 	}
@@ -130,13 +133,21 @@ func (e *Engine) checkKnownSteps(v *PlanVersion, then string) error {
 // CheckAccounts compares the live identities with the reads in the signed-off plan.
 func (e *Engine) CheckAccounts(v *PlanVersion) error {
 	for _, side := range []review.Side{review.PagerDuty, review.JSM} {
-		i := slices.IndexFunc(v.Plan.Reads, func(r review.Read) bool { return r.Side == side })
-		if i < 0 || !v.Plan.Reads[i].Valid(side) {
-			return messages.ValidationFailed(fmt.Errorf("plan v%d has no verified %s account; run plan again", v.Version, side.Label()))
+		if err := e.CheckAccount(v, side); err != nil {
+			return err
 		}
-		if e.Accounts[side] != v.Plan.Reads[i].MigrationAccount {
-			return messages.ValidationFailed(fmt.Errorf("the %s account or organization differs from plan v%d; use the original accounts or a separate --workspace", side.Label(), v.Version))
-		}
+	}
+	return nil
+}
+
+// CheckAccount verifies the specific side used by a command against the sealed plan.
+func (e *Engine) CheckAccount(v *PlanVersion, side review.Side) error {
+	i := slices.IndexFunc(v.Plan.Reads, func(r review.Read) bool { return r.Side == side })
+	if i < 0 || !v.Plan.Reads[i].Valid(side) {
+		return messages.ValidationFailed(fmt.Errorf("plan v%d has no verified %s account; run plan again", v.Version, side.Label()))
+	}
+	if e.Accounts[side] != v.Plan.Reads[i].MigrationAccount {
+		return messages.ValidationFailed(fmt.Errorf("the %s account or organization differs from plan v%d; use the original accounts or a separate --workspace", side.Label(), v.Version))
 	}
 	return nil
 }
