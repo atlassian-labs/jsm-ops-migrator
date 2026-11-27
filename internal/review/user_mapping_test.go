@@ -74,6 +74,8 @@ func TestImportReviewedMappings(t *testing.T) {
 		{"wrong version", func(r [][]string) [][]string { r[1][7] = "2"; return r }},
 		{"wrong hash", func(r [][]string) [][]string { r[1][8] = "other"; return r }},
 		{"missing decision", func(r [][]string) [][]string { r[1] = r[1][:9]; return r }},
+		{"blank decision", func(r [][]string) [][]string { r[2][9] = ""; return r }},
+		{"one placeholder left", func(r [][]string) [][]string { r[2][9] = parse(t)[2][9]; return r }},
 		{"invalid decision", func(r [][]string) [][]string { r[1][9] = "approve"; return r }},
 		{"accepted ambiguity", func(r [][]string) [][]string { r[2][9] = "accept"; return r }},
 		{"old header", func(r [][]string) [][]string { r[0] = r[0][:7]; return r }},

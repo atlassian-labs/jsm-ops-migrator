@@ -361,16 +361,19 @@ func ContentHash(p Plan) (string, error) {
 	}
 	// A changed identity review format requires a fresh export even when all
 	// proposed users match the previous version.
+	var mappingFormat int
 	var columns []string
 	if n.HasUserMappings() {
+		mappingFormat = 2 // The previous template used blank decision cells.
 		columns = mappingColumns
 	}
 	data, err := encodeJSON(struct {
+		MappingFormat  int                `json:"mapping_format,omitempty"`
 		MappingColumns []string           `json:"mapping_columns,omitempty"`
 		Accounts       []MigrationAccount `json:"accounts,omitempty"`
 		Items          []Item             `json:"items"`
 		Messages       []messages.Message `json:"messages"`
-	}{columns, accounts, n.Items, n.Messages})
+	}{mappingFormat, columns, accounts, n.Items, n.Messages})
 	if err != nil {
 		return "", err
 	}

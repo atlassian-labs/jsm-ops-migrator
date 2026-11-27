@@ -19,6 +19,7 @@ exec jsm-ops-migrator plan
 stdout 'Read PagerDuty: complete'
 stdout 'Read JSM: complete'
 stdout 'Plan v1: 0 calls'
+stdout 'copy .*mapping[.]csv and enter one choice in review_decision for every user row'
 stdout 'Messages: 0 blockers, 0 warnings, 0 manual tasks, 0 information'
 exists $W/plans/v1/plan.json
 exists $W/plans/v1/plan.md
@@ -32,6 +33,9 @@ grep 'P4,stakeholder@example.com,read_only_limited_user,,,exclude_stakeholder' $
 grep 'P5,inactive@example.com,user,,,review_inactive' $W/plans/v1/mapping.csv
 grep 'P6,ambiguous@example.com,user,,,review_ambiguous' $W/plans/v1/mapping.csv
 grep 'P7,other-site@example.com,user,other-site,no,propose_access' $W/plans/v1/mapping.csv
+grep 'map_existing,.*,Replace with accept / defer / skip$' $W/plans/v1/mapping.csv
+grep 'propose_access,.*,Replace with accept / defer / skip$' $W/plans/v1/mapping.csv
+grep 'review_directory_miss,.*,Replace with defer / skip$' $W/plans/v1/mapping.csv
 
 exec jsm-ops-migrator plan --only jsm
 stdout 'Plan v1 is unchanged'
@@ -43,7 +47,8 @@ stdout 'Plan v1 is unchanged'
 stderr 'needs reviewed user mappings'
 cp $W/plans/v1/mapping.csv reviewed.csv
 ! exec jsm-ops-migrator plan approve-mappings --version 1 --csv reviewed.csv
-stderr 'needs an accept, defer or skip decision'
+stderr 'record 2: set review_decision to one of accept / defer / skip'
+! exists $W/plans/v1/mapping-approval.json
 review-all reviewed.csv ' Defer '
 # The approver uses the sealed plan and target org. No PagerDuty access is needed.
 env JSM_OPS_MIGRATOR_PAGERDUTY_API_KEY=invalid-source-key

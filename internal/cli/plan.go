@@ -134,6 +134,12 @@ func runPlan(ctx context.Context, env *Env, f PlanFlags) error {
 		if err := writePlan(env.Stdout, out.Plan); err != nil {
 			return err
 		}
+		if res.Version.Plan.HasUserMappings() && res.Version.Blockers == 0 {
+			path := displayPath(filepath.Join(out.Plan.Dir, review.MappingFile))
+			if _, err := fmt.Fprintf(env.Stdout, "To review user mappings, copy %s and enter one choice in review_decision for every user row.\n", path); err != nil {
+				return err
+			}
+		}
 	}
 	env.summarize(planSummary(out.Plan))
 	if res.Version.Blockers > 0 {

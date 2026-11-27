@@ -31,7 +31,7 @@ func runApproveMappings(ctx context.Context, env *Env, version int, path string)
 		return err
 	}
 	if v.LegacyMappingExport {
-		return messages.ValidationFailed(errors.New("run plan again to export a CSV with blank review decisions"))
+		return messages.ValidationFailed(errors.New("run plan again to export a CSV with a review_decision field for each user"))
 	}
 	file, err := os.Open(path)
 	if err != nil {

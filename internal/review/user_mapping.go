@@ -33,6 +33,17 @@ type MappingDecision struct {
 
 var mappingColumns = []string{"pd_user_id", "pd_email", "pd_role", "proposed_account_id", "target_jsm_access", "proposed_action", "reason", "plan_version", "plan_hash", "review_decision"}
 
+func (m UserMapping) canAccept() bool {
+	return m.AccountID != "" && (m.Decision == "map_existing" || m.Decision == "propose_access")
+}
+
+func (m UserMapping) decisionChoices() string {
+	if m.canAccept() {
+		return "accept / defer / skip"
+	}
+	return "defer / skip"
+}
+
 func mappingRow(it Item, version int, hash string) []string {
 	m := it.UserMapping
 	row := []string{it.PagerDuty.ID, m.Email, m.Role, m.AccountID, m.SiteAccess, m.Decision, messages.Clean(it.Summary), strconv.Itoa(version), hash}
@@ -52,7 +63,8 @@ func proposedMappings(p Plan, hash string) ([]byte, error) {
 		if it.UserMapping == nil {
 			continue
 		}
-		if err := w.Write(append(mappingRow(it, p.Version, hash), "")); err != nil {
+		prompt := "Replace with " + it.UserMapping.decisionChoices()
+		if err := w.Write(append(mappingRow(it, p.Version, hash), prompt)); err != nil {
 			return nil, err
 		}
 	}
@@ -142,13 +154,13 @@ func ImportMappings(r io.Reader, p Plan, hash string) ([]MappingDecision, error)
 		switch d.Decision {
 		case "accept":
 			m := s.item.UserMapping
-			if (m.Decision != "map_existing" && m.Decision != "propose_access") || m.AccountID == "" {
-				return nil, fmt.Errorf("record %d has no eligible proposed mapping to accept", n)
+			if !m.canAccept() {
+				return nil, fmt.Errorf("record %d has no eligible proposed mapping to accept; set review_decision to defer or skip", n)
 			}
 			d.AccountID = s.item.UserMapping.AccountID
 		case "skip", "defer":
 		default:
-			return nil, fmt.Errorf("record %d needs an accept, defer or skip decision", n)
+			return nil, fmt.Errorf("record %d: set review_decision to one of %s", n, s.item.UserMapping.decisionChoices())
 		}
 		delete(rows, row[0])
 	}
